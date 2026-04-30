@@ -71,6 +71,7 @@ namespace AutoTransferWindowPlanner
         private double gridSearchSpan;
         private double gridTofMin;
         private double gridTofMax;
+        private bool porkchopShowsMissionDuration;
         private GameObject trajectoryOverlayRoot;
         private TransferResult overlayResult;
         private Material trajectoryLineMaterial;
@@ -637,8 +638,15 @@ namespace AutoTransferWindowPlanner
             Rect texRect = new Rect(plotRect.x + 38f, plotRect.y + 10f, plotRect.width - 55f, plotRect.height - 42f);
             GUI.DrawTexture(texRect, porkchopTexture, ScaleMode.StretchToFill, false);
 
-            GUI.Label(new Rect(plotRect.x + 8f, plotRect.y + 6f, 50f, 20f), "TOF");
+            GUI.Label(new Rect(plotRect.x + 8f, plotRect.y + 6f, 120f, 20f), porkchopShowsMissionDuration ? "Время миссии" : "TOF");
             GUI.Label(new Rect(plotRect.x + 190f, plotRect.y + plotRect.height - 24f, 220f, 20f), "Дата старта");
+
+            if (bestGridI >= 0 && bestGridJ >= 0 && gridDepartSamples > 1 && gridTofSamples > 1)
+            {
+                float x = texRect.x + texRect.width * bestGridI / Math.Max(1f, gridDepartSamples - 1f);
+                float y = texRect.y + texRect.height - texRect.height * bestGridJ / Math.Max(1f, gridTofSamples - 1f);
+                GUI.Label(new Rect(x - 8f, y - 10f, 24f, 20f), "X");
+            }
 
             if (bestResult != null)
             {
@@ -854,6 +862,7 @@ namespace AutoTransferWindowPlanner
                 dvGrid = null;
                 bestGridI = -1;
                 bestGridJ = -1;
+                porkchopShowsMissionDuration = true;
                 searchProgress = 0f;
                 cancelSearch = false;
                 searchRunning = true;
@@ -910,6 +919,7 @@ namespace AutoTransferWindowPlanner
             dvGrid = null;
             bestGridI = -1;
             bestGridJ = -1;
+            porkchopShowsMissionDuration = false;
             searchProgress = 0f;
             cancelSearch = false;
             searchRunning = true;
@@ -1042,6 +1052,21 @@ namespace AutoTransferWindowPlanner
             double bestScore = double.PositiveInfinity;
             int evalCount = 0;
             int totalCount = Math.Max(1, routeTemplates.Count * request.DepartSamples);
+            gridDepartSamples = request.DepartSamples;
+            gridTofSamples = GetGravityPorkchopRows();
+            gridStartUT = request.StartUT;
+            gridSearchSpan = request.SearchSpan;
+            gridTofMin = 0.0;
+            gridTofMax = request.MaxMissionTime;
+            porkchopShowsMissionDuration = true;
+            dvGrid = new double[gridDepartSamples, gridTofSamples];
+            for (int i = 0; i < gridDepartSamples; i++)
+            {
+                for (int j = 0; j < gridTofSamples; j++)
+                {
+                    dvGrid[i, j] = double.NaN;
+                }
+            }
 
             statusText = "Маршрутов: " + routeTemplates.Count + ". Ищу цепочку flyby...";
 
@@ -1064,10 +1089,13 @@ namespace AutoTransferWindowPlanner
                     TransferResult candidate;
                     if (TrySearchRouteTemplate(request, routeTemplates[routeIndex], departUT, out candidate))
                     {
+                        int porkchopJ = RecordGravityPorkchopCandidate(candidate, i, request);
                         if (candidate.TotalDV < bestScore)
                         {
                             bestScore = candidate.TotalDV;
                             best = candidate;
+                            bestGridI = i;
+                            bestGridJ = porkchopJ;
                             statusText = "Лучший маршрут: " + candidate.RouteName + " / " + FormatDV(candidate.TotalDV);
                         }
                     }
@@ -1099,8 +1127,41 @@ namespace AutoTransferWindowPlanner
                 statusText = "Маршрут не найден. Увеличь максимальное время полёта, годы поиска или число пролётов.";
             }
 
+            BuildPorkchopTexture();
             searchProgress = 1f;
             searchRunning = false;
+        }
+
+        private int GetGravityPorkchopRows()
+        {
+            if (qualityIndex <= 0)
+            {
+                return 36;
+            }
+            if (qualityIndex == 1)
+            {
+                return 48;
+            }
+
+            return 64;
+        }
+
+        private int RecordGravityPorkchopCandidate(TransferResult candidate, int departIndex, GravityRouteSearchRequest request)
+        {
+            if (candidate == null || dvGrid == null || gridTofSamples <= 0)
+            {
+                return -1;
+            }
+
+            double missionFraction = request.MaxMissionTime > 0.0 ? candidate.TimeOfFlight / request.MaxMissionTime : 0.0;
+            int j = Mathf.Clamp((int)Math.Round(Clamp01(missionFraction) * Math.Max(1, gridTofSamples - 1)), 0, Math.Max(0, gridTofSamples - 1));
+            double current = dvGrid[departIndex, j];
+            if (!IsFinite(current) || candidate.TotalDV < current)
+            {
+                dvGrid[departIndex, j] = candidate.TotalDV;
+            }
+
+            return j;
         }
 
         private List<RouteTemplate> BuildRouteTemplates(GravityRouteSearchRequest request)
@@ -2463,6 +2524,7 @@ namespace AutoTransferWindowPlanner
             {
                 solver.RemoveManeuverNode(solver.maneuverNodes[i]);
             }
+            solver.UpdateFlightPlan();
         }
 
         private ManeuverCandidate OptimizeManeuverNodeForFirstLeg(PatchedConicSolver solver, ManeuverNode node, Vessel vessel, RouteLegResult leg)
@@ -2477,7 +2539,7 @@ namespace AutoTransferWindowPlanner
 
             ManeuverCandidate best = null;
             double startUT = Math.Max(now, plannedUT - orbitPeriod * 0.5);
-            int timeSamples = 36;
+            int timeSamples = qualityIndex <= 0 ? 48 : (qualityIndex == 1 ? 72 : 120);
             for (int i = 0; i <= timeSamples; i++)
             {
                 double ut = startUT + orbitPeriod * i / timeSamples;
@@ -2491,28 +2553,75 @@ namespace AutoTransferWindowPlanner
             }
 
             ApplyManeuverNode(node, best.UT, best.DeltaV);
+            RefineManeuverNodeTime(solver, node, vessel, leg, orbitPeriod, ref best);
             RefineManeuverNodeComponents(solver, node, leg, ref best);
             return best;
         }
 
-        private void TryEvaluateLambertSeed(PatchedConicSolver solver, ManeuverNode node, Vessel vessel, RouteLegResult leg, double ut, bool longWay, ref ManeuverCandidate best)
+        private void RefineManeuverNodeTime(PatchedConicSolver solver, ManeuverNode node, Vessel vessel, RouteLegResult leg, double orbitPeriod, ref ManeuverCandidate best)
         {
-            Vector3d deltaV;
-            double arrivalUT;
-            if (!TryComputeGameStateLambertDeltaV(vessel, leg, ut, longWay, out deltaV, out arrivalUT))
+            if (best == null || !best.IsValid)
             {
                 return;
             }
 
-            Vector3d[] seeds =
+            double now = Planetarium.GetUniversalTime() + 60.0;
+            double[] steps =
             {
-                deltaV,
-                new Vector3d(-deltaV.x, deltaV.y, deltaV.z),
-                new Vector3d(deltaV.x, -deltaV.y, deltaV.z),
-                new Vector3d(-deltaV.x, -deltaV.y, deltaV.z)
+                orbitPeriod / 144.0,
+                orbitPeriod / 432.0,
+                orbitPeriod / 1296.0
             };
 
-            for (int i = 0; i < seeds.Length; i++)
+            for (int stepIndex = 0; stepIndex < steps.Length; stepIndex++)
+            {
+                double step = Math.Max(1.0, steps[stepIndex]);
+                bool improved = true;
+                int guard = 0;
+                while (improved && guard < 5)
+                {
+                    improved = false;
+                    guard++;
+                    ManeuverCandidate before = best;
+                    for (int sign = -1; sign <= 1; sign += 2)
+                    {
+                        double testUT = Math.Max(now, before.UT + sign * step);
+                        TryEvaluateLambertSeed(solver, node, vessel, leg, testUT, leg.LongWay, ref best);
+                        TryEvaluateLambertSeed(solver, node, vessel, leg, testUT, !leg.LongWay, ref best);
+                    }
+
+                    improved = best != before;
+                }
+            }
+
+            ApplyManeuverNode(node, best.UT, best.DeltaV);
+        }
+
+        private void TryEvaluateLambertSeed(PatchedConicSolver solver, ManeuverNode node, Vessel vessel, RouteLegResult leg, double ut, bool longWay, ref ManeuverCandidate best)
+        {
+            double arrivalUT = leg.ArrivalUT + (ut - leg.DepartUT);
+            List<Vector3d> seeds = new List<Vector3d>();
+
+            Vector3d ejectionDeltaV;
+            if (TryComputePlanetCenteredEjectionDeltaV(vessel, leg, ut, longWay, out ejectionDeltaV, out arrivalUT))
+            {
+                AddManeuverSeedVariants(seeds, ejectionDeltaV);
+            }
+
+            Vector3d directDeltaV;
+            double directArrivalUT;
+            if (TryComputeGameStateLambertDeltaV(vessel, leg, ut, longWay, out directDeltaV, out directArrivalUT))
+            {
+                arrivalUT = directArrivalUT;
+                AddManeuverSeedVariants(seeds, directDeltaV);
+            }
+
+            if (seeds.Count == 0)
+            {
+                return;
+            }
+
+            for (int i = 0; i < seeds.Count; i++)
             {
                 ApplyManeuverNode(node, ut, seeds[i]);
                 ManeuverCandidate candidate = EvaluateCurrentManeuverNode(solver, node, leg, arrivalUT);
@@ -2529,6 +2638,114 @@ namespace AutoTransferWindowPlanner
                     best = candidate;
                 }
             }
+        }
+
+        private static void AddManeuverSeedVariants(List<Vector3d> seeds, Vector3d deltaV)
+        {
+            if (seeds == null || !IsFinite(deltaV.magnitude) || deltaV.magnitude <= 0.0 || deltaV.magnitude > 25000.0)
+            {
+                return;
+            }
+
+            AddManeuverSeed(seeds, deltaV);
+            AddManeuverSeed(seeds, new Vector3d(-deltaV.x, deltaV.y, deltaV.z));
+            AddManeuverSeed(seeds, new Vector3d(deltaV.x, -deltaV.y, deltaV.z));
+            AddManeuverSeed(seeds, new Vector3d(-deltaV.x, -deltaV.y, deltaV.z));
+        }
+
+        private static void AddManeuverSeed(List<Vector3d> seeds, Vector3d deltaV)
+        {
+            for (int i = 0; i < seeds.Count; i++)
+            {
+                if ((seeds[i] - deltaV).sqrMagnitude < 0.01)
+                {
+                    return;
+                }
+            }
+
+            seeds.Add(deltaV);
+        }
+
+        private bool TryComputePlanetCenteredEjectionDeltaV(Vessel vessel, RouteLegResult leg, double nodeUT, bool longWay, out Vector3d deltaV, out double arrivalUT)
+        {
+            deltaV = Vector3d.zero;
+            arrivalUT = leg.ArrivalUT + (nodeUT - leg.DepartUT);
+            double minArrivalUT = nodeUT + DaySeconds() * 0.25;
+            if (arrivalUT < minArrivalUT)
+            {
+                arrivalUT = minArrivalUT;
+            }
+
+            double tof = arrivalUT - nodeUT;
+            if (!IsFinite(tof) || tof <= DaySeconds() * 0.1)
+            {
+                return false;
+            }
+
+            CelestialBody central = leg.CentralBody;
+            Vector3d originPosition = GetBodyPositionRelativeTo(leg.From, central, nodeUT);
+            Vector3d originVelocity = GetBodyVelocityRelativeTo(leg.From, central, nodeUT);
+            Vector3d targetPosition = GetBodyPositionRelativeTo(leg.To, central, arrivalUT);
+            Vector3d transferVelocity;
+            Vector3d ignoredArrivalVelocity;
+            if (!LambertSolver.TrySolve(originPosition, targetPosition, tof, central.gravParameter, longWay, out transferVelocity, out ignoredArrivalVelocity))
+            {
+                return false;
+            }
+
+            Vector3d desiredVInf = transferVelocity - originVelocity;
+            if (!IsFinite(desiredVInf.magnitude) || desiredVInf.magnitude <= 0.0)
+            {
+                return false;
+            }
+
+            return TryComputeEjectionBurnFromVInf(vessel.orbit, leg.From, nodeUT, desiredVInf, out deltaV);
+        }
+
+        private static bool TryComputeEjectionBurnFromVInf(Orbit parkingOrbit, CelestialBody origin, double nodeUT, Vector3d desiredVInf, out Vector3d deltaV)
+        {
+            deltaV = Vector3d.zero;
+            if (parkingOrbit == null || origin == null || desiredVInf.sqrMagnitude < 1e-8)
+            {
+                return false;
+            }
+
+            Vector3d radius = parkingOrbit.getRelativePositionAtUT(nodeUT);
+            Vector3d velocity = parkingOrbit.getOrbitalVelocityAtUT(nodeUT);
+            if (radius.sqrMagnitude < 1e-8 || velocity.sqrMagnitude < 1e-8)
+            {
+                return false;
+            }
+
+            double r = Math.Max(origin.Radius + 1.0, radius.magnitude);
+            double vinf = desiredVInf.magnitude;
+            double mu = origin.gravParameter;
+            double hyperbolaSpeed = Math.Sqrt(vinf * vinf + 2.0 * mu / r);
+            double eccentricity = 1.0 + r * vinf * vinf / mu;
+            double sinAlpha = Clamp(1.0 / Math.Max(1.000001, eccentricity), 0.0, 0.999999);
+
+            Vector3d radial = radius.normalized;
+            Vector3d asymptote = desiredVInf.normalized;
+            Vector3d periapsisVelocityDirection = asymptote + radial * sinAlpha;
+            periapsisVelocityDirection -= radial * Vector3d.Dot(periapsisVelocityDirection, radial);
+            if (periapsisVelocityDirection.sqrMagnitude < 1e-8)
+            {
+                periapsisVelocityDirection = velocity - radial * Vector3d.Dot(velocity, radial);
+            }
+            if (periapsisVelocityDirection.sqrMagnitude < 1e-8)
+            {
+                return false;
+            }
+
+            Vector3d requiredLocalVelocity = periapsisVelocityDirection.normalized * hyperbolaSpeed;
+            Vector3d localBurn = requiredLocalVelocity - velocity;
+            if (!IsFinite(localBurn.magnitude) || localBurn.magnitude <= 0.0 || localBurn.magnitude > 25000.0)
+            {
+                return false;
+            }
+
+            deltaV = WorldDeltaToManeuverDelta(parkingOrbit, nodeUT, localBurn);
+            return IsFinite(deltaV.magnitude);
         }
 
         private bool TryComputeGameStateLambertDeltaV(Vessel vessel, RouteLegResult leg, double nodeUT, bool longWay, out Vector3d deltaV, out double arrivalUT)
@@ -2823,6 +3040,7 @@ namespace AutoTransferWindowPlanner
 
         private static void ApplyManeuverNode(ManeuverNode node, double ut, Vector3d deltaV)
         {
+            node.UT = ut;
             node.DeltaV = deltaV;
             node.OnGizmoUpdated(deltaV, ut);
         }
