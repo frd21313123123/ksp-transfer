@@ -1,10 +1,10 @@
 {
   "NAME": "Auto Transfer Window Planner",
   "URL": "https://raw.githubusercontent.com/frd21313123123/ksp-transfer/main/GameData/AutoTransferWindowPlanner/AutoTransferWindowPlanner.version",
-  "DOWNLOAD": "https://github.com/frd21313123123/ksp-transfer/releases/download/v0.2.0/AutoTransferWindowPlanner-0.2.0.zip",
+  "DOWNLOAD": "https://github.com/frd21313123123/ksp-transfer/releases/download/v0.3.0/AutoTransferWindowPlanner-0.3.0.zip",
   "VERSION": {
     "MAJOR": 0,
-    "MINOR": 2,
+    "MINOR": 3,
     "PATCH": 0,
     "BUILD": 0
   },

@@ -33,8 +33,10 @@ namespace AutoTransferWindowPlanner
         private bool windowVisible;
 
         private readonly List<CelestialBody> bodies = new List<CelestialBody>();
+        private readonly List<TargetSelection> missionTargets = new List<TargetSelection>();
         private int originIndex;
         private int destinationIndex;
+        private int selectedTargetIndex;
 
         private string parkingAltitudeKm = "100";
         private string captureAltitudeKm = "100";
@@ -45,6 +47,9 @@ namespace AutoTransferWindowPlanner
         private string maxMissionYears = "8";
         private string maxFlybys = "3";
         private bool gravityAssistMode = true;
+        private bool autoTargetOrder = true;
+        private bool useMoonAssists = true;
+        private bool showTrajectoryOverlay = true;
         private bool autoTof = true;
         private bool includeCapture = true;
 
@@ -65,6 +70,10 @@ namespace AutoTransferWindowPlanner
         private double gridSearchSpan;
         private double gridTofMin;
         private double gridTofMax;
+        private GameObject trajectoryOverlayRoot;
+        private TransferResult overlayResult;
+        private Material trajectoryLineMaterial;
+        private Material trajectoryMarkerMaterial;
 
         private void Awake()
         {
@@ -114,6 +123,18 @@ namespace AutoTransferWindowPlanner
                 launcherIcon = null;
             }
 
+            ClearTrajectoryOverlay();
+            if (trajectoryLineMaterial != null)
+            {
+                Destroy(trajectoryLineMaterial);
+                trajectoryLineMaterial = null;
+            }
+            if (trajectoryMarkerMaterial != null)
+            {
+                Destroy(trajectoryMarkerMaterial);
+                trajectoryMarkerMaterial = null;
+            }
+
             if (instance == this)
             {
                 instance = null;
@@ -158,6 +179,7 @@ namespace AutoTransferWindowPlanner
         {
             windowVisible = false;
             InputLockManager.RemoveControlLock(InputLockName);
+            ClearTrajectoryOverlay();
             RemoveLauncherButton();
         }
 
@@ -183,6 +205,7 @@ namespace AutoTransferWindowPlanner
         {
             windowVisible = false;
             InputLockManager.RemoveControlLock(InputLockName);
+            ClearTrajectoryOverlay();
         }
 
         private void Update()
@@ -190,6 +213,11 @@ namespace AutoTransferWindowPlanner
             if (!windowVisible)
             {
                 return;
+            }
+
+            if (showTrajectoryOverlay && bestResult != null && trajectoryOverlayRoot == null && IsMapOverlayScene())
+            {
+                BuildTrajectoryOverlay(bestResult);
             }
 
             if (windowRect.Contains(new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y)))
@@ -266,7 +294,7 @@ namespace AutoTransferWindowPlanner
 
             GUILayout.Label("Параметры поиска", GUILayout.Height(22f));
             DrawBodySelector("Старт", ref originIndex);
-            DrawBodySelector("Цель", ref destinationIndex);
+            DrawTargetList();
 
             GUILayout.Space(6f);
             GUILayout.Label("Орбиты");
@@ -281,6 +309,18 @@ namespace AutoTransferWindowPlanner
             GUILayout.Space(6f);
             gravityAssistMode = GUILayout.Toggle(gravityAssistMode, "Авто маршрут через flyby");
             GUI.enabled = gravityAssistMode;
+            autoTargetOrder = GUILayout.Toggle(autoTargetOrder, "Авто порядок целей");
+            useMoonAssists = GUILayout.Toggle(useMoonAssists, "Учитывать луны");
+            bool previousOverlay = showTrajectoryOverlay;
+            showTrajectoryOverlay = GUILayout.Toggle(showTrajectoryOverlay, "Показать траекторию");
+            if (previousOverlay && !showTrajectoryOverlay)
+            {
+                ClearTrajectoryOverlay();
+            }
+            if (!previousOverlay && showTrajectoryOverlay && bestResult != null)
+            {
+                BuildTrajectoryOverlay(bestResult);
+            }
             DrawTextFieldRow("Макс. время полёта, лет", ref maxMissionYears);
             DrawTextFieldRow("Макс. пролётов планет", ref maxFlybys);
             GUI.enabled = true;
@@ -300,7 +340,7 @@ namespace AutoTransferWindowPlanner
             DrawTextFieldRow("TOF max, дней", ref tofMaxDays);
             GUI.enabled = true;
 
-            includeCapture = GUILayout.Toggle(includeCapture, "Считать Δv захвата у цели");
+            GUILayout.Label("Захват задаётся режимом каждой цели.");
 
             GUILayout.BeginHorizontal();
             GUILayout.Label("Качество", GUILayout.Width(120f));
@@ -335,8 +375,8 @@ namespace AutoTransferWindowPlanner
             GUILayout.Space(6f);
             GUILayout.Label("Поддержка:");
             GUILayout.TextArea(
-                "Прямой режим считает обычный Lambert-перелёт. Авто маршрут перебирает цепочки через планеты с тем же родителем, " +
-                "оценивает гравитационные пролёты и добавляет штраф Δv, если планета не может бесплатно повернуть v∞ на нужный угол.",
+                "Прямой режим считает обычный Lambert-перелёт к первой цели. Авто маршрут посещает все цели, перебирает порядок, если включено, " +
+                "и сравнивает прямые flyby с лунными assist-манёврами.",
                 GUILayout.Height(85f));
 
             GUILayout.EndVertical();
@@ -375,6 +415,186 @@ namespace AutoTransferWindowPlanner
                 index = WrapIndex(index + 1, bodies.Count);
             }
             GUILayout.EndHorizontal();
+        }
+
+        private void DrawTargetList()
+        {
+            EnsureTargetList();
+
+            GUILayout.Space(4f);
+            GUILayout.Label("Цели миссии", GUILayout.Height(20f));
+
+            int removeIndex = -1;
+            for (int i = 0; i < missionTargets.Count; i++)
+            {
+                DrawTargetRow(i, ref removeIndex);
+            }
+
+            if (removeIndex >= 0 && missionTargets.Count > 1)
+            {
+                missionTargets.RemoveAt(removeIndex);
+                selectedTargetIndex = Mathf.Clamp(selectedTargetIndex, 0, missionTargets.Count - 1);
+                SyncDestinationFromTargets();
+            }
+
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("Добавить", GUILayout.Width(82f)) && missionTargets.Count < 5)
+            {
+                missionTargets.Add(new TargetSelection
+                {
+                    BodyIndex = GetNextDefaultTargetIndex(),
+                    Mode = TargetVisitMode.Flyby
+                });
+                selectedTargetIndex = missionTargets.Count - 1;
+                SyncDestinationFromTargets();
+            }
+
+            GUI.enabled = missionTargets.Count > 1;
+            if (GUILayout.Button("Вверх", GUILayout.Width(62f)))
+            {
+                MoveTarget(selectedTargetIndex, -1);
+            }
+            if (GUILayout.Button("Вниз", GUILayout.Width(62f)))
+            {
+                MoveTarget(selectedTargetIndex, 1);
+            }
+            GUI.enabled = true;
+            GUILayout.EndHorizontal();
+        }
+
+        private void DrawTargetRow(int targetIndex, ref int removeIndex)
+        {
+            TargetSelection target = missionTargets[targetIndex];
+            bool selected = selectedTargetIndex == targetIndex;
+
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Toggle(selected, "", GUILayout.Width(18f)))
+            {
+                selectedTargetIndex = targetIndex;
+            }
+
+            int bodyIndex = WrapIndex(target.BodyIndex, bodies.Count);
+            if (GUILayout.Button("<", GUILayout.Width(24f)))
+            {
+                bodyIndex = WrapIndex(bodyIndex - 1, bodies.Count);
+            }
+            GUILayout.Label(GetBodyName(bodyIndex), GUILayout.Width(72f));
+            if (GUILayout.Button(">", GUILayout.Width(24f)))
+            {
+                bodyIndex = WrapIndex(bodyIndex + 1, bodies.Count);
+            }
+
+            target.BodyIndex = bodyIndex;
+            if (GUILayout.Button(target.Mode == TargetVisitMode.Capture ? "Орбита" : "Пролёт", GUILayout.Width(58f)))
+            {
+                target.Mode = target.Mode == TargetVisitMode.Capture ? TargetVisitMode.Flyby : TargetVisitMode.Capture;
+            }
+
+            GUI.enabled = missionTargets.Count > 1;
+            if (GUILayout.Button("X", GUILayout.Width(24f)))
+            {
+                removeIndex = targetIndex;
+            }
+            GUI.enabled = true;
+            GUILayout.EndHorizontal();
+
+            missionTargets[targetIndex] = target;
+            SyncDestinationFromTargets();
+        }
+
+        private void MoveTarget(int index, int delta)
+        {
+            if (missionTargets.Count < 2)
+            {
+                return;
+            }
+
+            int from = Mathf.Clamp(index, 0, missionTargets.Count - 1);
+            int to = Mathf.Clamp(from + delta, 0, missionTargets.Count - 1);
+            if (from == to)
+            {
+                return;
+            }
+
+            TargetSelection target = missionTargets[from];
+            missionTargets.RemoveAt(from);
+            missionTargets.Insert(to, target);
+            selectedTargetIndex = to;
+            SyncDestinationFromTargets();
+        }
+
+        private int GetNextDefaultTargetIndex()
+        {
+            int start = missionTargets.Count > 0 ? missionTargets[missionTargets.Count - 1].BodyIndex + 1 : destinationIndex;
+            for (int i = 0; i < bodies.Count; i++)
+            {
+                int candidate = WrapIndex(start + i, bodies.Count);
+                if (candidate != WrapIndex(originIndex, bodies.Count))
+                {
+                    return candidate;
+                }
+            }
+
+            return WrapIndex(destinationIndex, bodies.Count);
+        }
+
+        private void EnsureTargetList()
+        {
+            if (bodies.Count == 0)
+            {
+                return;
+            }
+
+            if (missionTargets.Count == 0)
+            {
+                missionTargets.Add(new TargetSelection
+                {
+                    BodyIndex = WrapIndex(destinationIndex, bodies.Count),
+                    Mode = includeCapture ? TargetVisitMode.Capture : TargetVisitMode.Flyby
+                });
+            }
+
+            for (int i = 0; i < missionTargets.Count; i++)
+            {
+                TargetSelection target = missionTargets[i];
+                target.BodyIndex = WrapIndex(target.BodyIndex, bodies.Count);
+                missionTargets[i] = target;
+            }
+
+            selectedTargetIndex = Mathf.Clamp(selectedTargetIndex, 0, missionTargets.Count - 1);
+            SyncDestinationFromTargets();
+        }
+
+        private void SyncDestinationFromTargets()
+        {
+            if (missionTargets.Count > 0)
+            {
+                destinationIndex = WrapIndex(missionTargets[missionTargets.Count - 1].BodyIndex, bodies.Count);
+            }
+        }
+
+        private List<MissionTarget> BuildMissionTargets()
+        {
+            EnsureTargetList();
+            List<MissionTarget> targets = new List<MissionTarget>();
+            for (int i = 0; i < missionTargets.Count; i++)
+            {
+                if (bodies.Count == 0)
+                {
+                    break;
+                }
+
+                TargetSelection selection = missionTargets[i];
+                CelestialBody body = bodies[WrapIndex(selection.BodyIndex, bodies.Count)];
+                targets.Add(new MissionTarget
+                {
+                    Body = body,
+                    Mode = selection.Mode,
+                    OriginalIndex = i
+                });
+            }
+
+            return targets;
         }
 
         private void DrawTextFieldRow(string label, ref string value)
@@ -433,9 +653,9 @@ namespace AutoTransferWindowPlanner
             }
 
             string longWayText = bestResult.LongWay ? "да" : "нет";
-            string captureLine = includeCapture
+            string captureLine = bestResult.InsertionDV > 0.0
                 ? "Δv захвата:       " + FormatDV(bestResult.InsertionDV) + "\n"
-                : "Δv захвата:       не включено в оптимизацию\n";
+                : "Δv захвата:       нет обязательного захвата\n";
 
             return
                 bestResult.Origin.bodyName + " -> " + bestResult.Destination.bodyName + "\n" +
@@ -473,13 +693,13 @@ namespace AutoTransferWindowPlanner
                 "Δv вылета:          " + FormatDV(result.EjectionDV) + "\n" +
                 "Δv powered flyby:   " + FormatDV(result.FlybyDV) + "\n";
 
-            if (includeCapture)
+            if (result.InsertionDV > 0.0)
             {
                 text += "Δv захвата:         " + FormatDV(result.InsertionDV) + "\n";
             }
             else
             {
-                text += "Δv захвата:         не включено\n";
+                text += "Δv захвата:         нет обязательного захвата\n";
             }
 
             text +=
@@ -491,7 +711,17 @@ namespace AutoTransferWindowPlanner
             for (int i = 0; i < result.RouteBodies.Length; i++)
             {
                 double ut = result.EncounterUTs != null && i < result.EncounterUTs.Length ? result.EncounterUTs[i] : result.DepartureUT;
-                text += "  " + (i + 1) + ". " + result.RouteBodies[i].bodyName + " — " + FormatUT(ut) + "\n";
+                string mode = "";
+                if (result.RouteNodes != null && i < result.RouteNodes.Length && result.RouteNodes[i].IsMandatory && i > 0)
+                {
+                    mode = result.RouteNodes[i].Mode == TargetVisitMode.Capture ? " / захват" : " / пролёт";
+                }
+                else if (i > 0)
+                {
+                    mode = " / assist";
+                }
+
+                text += "  " + (i + 1) + ". " + result.RouteBodies[i].bodyName + mode + " — " + FormatUT(ut) + "\n";
             }
 
             text += "\nУчастки:\n";
@@ -505,10 +735,25 @@ namespace AutoTransferWindowPlanner
 
                 if (i < result.RouteLegs.Length - 1)
                 {
+                    string assistName = string.IsNullOrEmpty(leg.FlybyAssistName) ? leg.To.bodyName : leg.FlybyAssistName;
                     text +=
                         " / flyby Δv " + FormatDV(leg.FlybyPoweredDV) +
+                        " / assist " + assistName +
                         " / поворот " + FormatAngle(leg.RequiredTurnDeg) +
                         " из " + FormatAngle(leg.FreeTurnDeg);
+                }
+
+                if (leg.CaptureDV > 0.0 || !string.IsNullOrEmpty(leg.CaptureAssistName))
+                {
+                    string captureAssist = string.IsNullOrEmpty(leg.CaptureAssistName) ? leg.To.bodyName : leg.CaptureAssistName;
+                    text +=
+                        " / захват " + FormatDV(leg.CaptureDV) +
+                        " / braking " + captureAssist +
+                        " / v∞ после " + FormatSpeed(leg.CapturePostAssistVInf);
+                    if (leg.CapturePoweredDV > 0.0)
+                    {
+                        text += " / powered " + FormatDV(leg.CapturePoweredDV);
+                    }
                 }
 
                 text += "\n";
@@ -524,6 +769,8 @@ namespace AutoTransferWindowPlanner
         private void BeginSearch()
         {
             RefreshBodies(false);
+            EnsureTargetList();
+            ClearTrajectoryOverlay();
 
             if (bodies.Count < 2)
             {
@@ -532,24 +779,41 @@ namespace AutoTransferWindowPlanner
             }
 
             CelestialBody origin = bodies[WrapIndex(originIndex, bodies.Count)];
-            CelestialBody destination = bodies[WrapIndex(destinationIndex, bodies.Count)];
+            List<MissionTarget> missionTargetVisits = BuildMissionTargets();
+            if (missionTargetVisits.Count == 0)
+            {
+                statusText = "Добавь хотя бы одну цель миссии.";
+                return;
+            }
+
+            CelestialBody destination = missionTargetVisits[missionTargetVisits.Count - 1].Body;
 
             if (origin == destination)
             {
-                statusText = "Старт и цель должны быть разными.";
+                statusText = "Финальная цель должна отличаться от старта.";
                 return;
             }
 
-            if (origin.orbit == null || destination.orbit == null || origin.orbit.referenceBody == null || destination.orbit.referenceBody == null)
+            if (origin.orbit == null || origin.orbit.referenceBody == null)
             {
-                statusText = "Одно из выбранных тел не имеет орбиты. Обычно это звезда/центр системы.";
+                statusText = "Стартовое тело не имеет орбиты. Обычно это звезда/центр системы.";
                 return;
             }
 
-            if (origin.orbit.referenceBody != destination.orbit.referenceBody)
+            for (int targetIndex = 0; targetIndex < missionTargetVisits.Count; targetIndex++)
             {
-                statusText = "Пока поддерживаются только тела с одним родительским телом. Например Kerbin -> Duna, но не Kerbin -> Mun.";
-                return;
+                CelestialBody targetBody = missionTargetVisits[targetIndex].Body;
+                if (targetBody == null || targetBody.orbit == null || targetBody.orbit.referenceBody == null)
+                {
+                    statusText = "Одна из выбранных целей не имеет орбиты. Обычно это звезда/центр системы.";
+                    return;
+                }
+
+                if (targetBody.orbit.referenceBody != origin.orbit.referenceBody)
+                {
+                    statusText = "Цели миссии должны вращаться вокруг того же родителя, что и старт. Луны сейчас используются как assist, но не как основные цели.";
+                    return;
+                }
             }
 
             double parkingAlt = ParseDouble(parkingAltitudeKm, 100.0) * 1000.0;
@@ -588,6 +852,8 @@ namespace AutoTransferWindowPlanner
                 {
                     Origin = origin,
                     Destination = destination,
+                    Targets = missionTargetVisits,
+                    AutoTargetOrder = autoTargetOrder,
                     ParkingAltitude = Math.Max(0.0, parkingAlt),
                     CaptureAltitude = Math.Max(0.0, captureAlt),
                     StartUT = startUT,
@@ -597,7 +863,8 @@ namespace AutoTransferWindowPlanner
                     DepartSamples = routeDepartSamples,
                     LegSamples = legSamples,
                     BeamWidth = beamWidth,
-                    IncludeCapture = includeCapture
+                    IncludeCapture = true,
+                    UseMoonAssists = useMoonAssists
                 };
 
                 StartCoroutine(SearchGravityRouteCoroutine(routeRequest));
@@ -649,7 +916,7 @@ namespace AutoTransferWindowPlanner
                 TofMax = maxTof,
                 DepartSamples = depSamples,
                 TofSamples = tofSamples,
-                IncludeCapture = includeCapture
+                IncludeCapture = missionTargetVisits[missionTargetVisits.Count - 1].Mode == TargetVisitMode.Capture
             };
 
             StartCoroutine(SearchCoroutine(request));
@@ -724,6 +991,10 @@ namespace AutoTransferWindowPlanner
                 best = RefineBest(request, best, 3);
                 bestResult = best;
                 statusText = "Готово. Лучшее окно найдено: " + FormatDV(best.TotalDV) + ".";
+                if (showTrajectoryOverlay)
+                {
+                    BuildTrajectoryOverlay(bestResult);
+                }
             }
             else if (cancelSearch)
             {
@@ -741,7 +1012,7 @@ namespace AutoTransferWindowPlanner
 
         private IEnumerator SearchGravityRouteCoroutine(GravityRouteSearchRequest request)
         {
-            List<CelestialBody[]> routeTemplates = BuildRouteTemplates(request);
+            List<RouteTemplate> routeTemplates = BuildRouteTemplates(request);
             if (routeTemplates.Count == 0)
             {
                 statusText = "Не удалось собрать список маршрутов для этих тел.";
@@ -797,6 +1068,10 @@ namespace AutoTransferWindowPlanner
             {
                 bestResult = best;
                 statusText = "Готово. Лучший маршрут: " + best.RouteName + " / " + FormatDV(best.TotalDV) + ".";
+                if (showTrajectoryOverlay)
+                {
+                    BuildTrajectoryOverlay(bestResult);
+                }
             }
             else if (cancelSearch)
             {
@@ -811,77 +1086,177 @@ namespace AutoTransferWindowPlanner
             searchRunning = false;
         }
 
-        private List<CelestialBody[]> BuildRouteTemplates(GravityRouteSearchRequest request)
+        private List<RouteTemplate> BuildRouteTemplates(GravityRouteSearchRequest request)
         {
-            List<CelestialBody[]> routes = new List<CelestialBody[]>();
-            List<CelestialBody> flybyCandidates = GetFlybyCandidates(request.Origin, request.Destination);
+            List<RouteTemplate> routes = new List<RouteTemplate>();
+            List<MissionTarget[]> targetOrders = BuildTargetOrders(request.Targets, request.AutoTargetOrder);
+            List<CelestialBody> flybyCandidates = GetFlybyCandidates(request.Origin, request.Targets);
 
-            routes.Add(new[] { request.Origin, request.Destination });
-
-            int maxFlybysRequested = Math.Max(0, request.MaxFlybys);
-            List<CelestialBody> current = new List<CelestialBody>();
-            for (int flybyCount = 1; flybyCount <= maxFlybysRequested; flybyCount++)
+            for (int orderIndex = 0; orderIndex < targetOrders.Count; orderIndex++)
             {
-                BuildRouteTemplatesRecursive(request, flybyCandidates, flybyCount, current, routes);
+                List<RouteNode> nodes = new List<RouteNode>();
+                nodes.Add(new RouteNode
+                {
+                    Body = request.Origin,
+                    Mode = TargetVisitMode.Flyby,
+                    IsMandatory = true,
+                    TargetIndex = -1
+                });
+
+                MissionTarget[] orderedTargets = targetOrders[orderIndex];
+                for (int i = 0; i < orderedTargets.Length; i++)
+                {
+                    nodes.Add(new RouteNode
+                    {
+                        Body = orderedTargets[i].Body,
+                        Mode = orderedTargets[i].Mode,
+                        IsMandatory = true,
+                        TargetIndex = orderedTargets[i].OriginalIndex
+                    });
+                }
+
+                AddRouteTemplate(routes, nodes, orderedTargets);
+                for (int flybyCount = 1; flybyCount <= request.MaxFlybys && routes.Count < MaxRouteTemplateCount(); flybyCount++)
+                {
+                    BuildRouteTemplatesRecursive(request, flybyCandidates, flybyCount, nodes, orderedTargets, routes);
+                }
             }
 
             return routes;
+        }
+
+        private List<MissionTarget[]> BuildTargetOrders(List<MissionTarget> targets, bool autoOrder)
+        {
+            List<MissionTarget[]> orders = new List<MissionTarget[]>();
+            if (!autoOrder || targets.Count <= 1)
+            {
+                orders.Add(targets.ToArray());
+                return orders;
+            }
+
+            List<MissionTarget> work = new List<MissionTarget>(targets);
+            BuildTargetOrdersRecursive(work, 0, orders);
+            return orders;
+        }
+
+        private void BuildTargetOrdersRecursive(List<MissionTarget> work, int index, List<MissionTarget[]> orders)
+        {
+            if (orders.Count >= MaxTargetOrderCount())
+            {
+                return;
+            }
+
+            if (index >= work.Count)
+            {
+                orders.Add(work.ToArray());
+                return;
+            }
+
+            for (int i = index; i < work.Count; i++)
+            {
+                MissionTarget tmp = work[index];
+                work[index] = work[i];
+                work[i] = tmp;
+
+                BuildTargetOrdersRecursive(work, index + 1, orders);
+
+                tmp = work[index];
+                work[index] = work[i];
+                work[i] = tmp;
+            }
         }
 
         private void BuildRouteTemplatesRecursive(
             GravityRouteSearchRequest request,
             List<CelestialBody> flybyCandidates,
             int flybysLeft,
-            List<CelestialBody> current,
-            List<CelestialBody[]> routes)
+            List<RouteNode> currentNodes,
+            MissionTarget[] orderedTargets,
+            List<RouteTemplate> routes)
         {
-            if (flybysLeft == 0)
+            if (routes.Count >= MaxRouteTemplateCount())
             {
-                CelestialBody[] route = new CelestialBody[current.Count + 2];
-                route[0] = request.Origin;
-                for (int i = 0; i < current.Count; i++)
-                {
-                    route[i + 1] = current[i];
-                }
-                route[route.Length - 1] = request.Destination;
-                routes.Add(route);
                 return;
             }
 
-            for (int i = 0; i < flybyCandidates.Count; i++)
+            if (flybysLeft == 0)
             {
-                CelestialBody body = flybyCandidates[i];
-                if (body == request.Destination)
-                {
-                    continue;
-                }
+                AddRouteTemplate(routes, currentNodes, orderedTargets);
+                return;
+            }
 
-                int countSameAtEnd = 0;
-                for (int j = current.Count - 1; j >= 0; j--)
+            for (int insertIndex = 1; insertIndex < currentNodes.Count && routes.Count < MaxRouteTemplateCount(); insertIndex++)
+            {
+                for (int candidateIndex = 0; candidateIndex < flybyCandidates.Count && routes.Count < MaxRouteTemplateCount(); candidateIndex++)
                 {
-                    if (current[j] != body)
+                    CelestialBody body = flybyCandidates[candidateIndex];
+                    RouteNode node = new RouteNode
                     {
-                        break;
+                        Body = body,
+                        Mode = TargetVisitMode.Flyby,
+                        IsMandatory = false,
+                        TargetIndex = -1
+                    };
+
+                    if (!CanInsertFlyby(currentNodes, insertIndex, body))
+                    {
+                        continue;
                     }
-                    countSameAtEnd++;
-                }
 
-                if (countSameAtEnd >= 2)
-                {
-                    continue;
+                    currentNodes.Insert(insertIndex, node);
+                    BuildRouteTemplatesRecursive(request, flybyCandidates, flybysLeft - 1, currentNodes, orderedTargets, routes);
+                    currentNodes.RemoveAt(insertIndex);
                 }
-
-                current.Add(body);
-                BuildRouteTemplatesRecursive(request, flybyCandidates, flybysLeft - 1, current, routes);
-                current.RemoveAt(current.Count - 1);
             }
         }
 
-        private List<CelestialBody> GetFlybyCandidates(CelestialBody origin, CelestialBody destination)
+        private static bool CanInsertFlyby(List<RouteNode> nodes, int insertIndex, CelestialBody body)
+        {
+            int sameCount = 0;
+            for (int i = insertIndex - 1; i >= 0; i--)
+            {
+                if (nodes[i].Body != body)
+                {
+                    break;
+                }
+                sameCount++;
+            }
+            for (int i = insertIndex; i < nodes.Count; i++)
+            {
+                if (nodes[i].Body != body)
+                {
+                    break;
+                }
+                sameCount++;
+            }
+
+            return sameCount < 2;
+        }
+
+        private static void AddRouteTemplate(List<RouteTemplate> routes, List<RouteNode> nodes, MissionTarget[] orderedTargets)
+        {
+            RouteNode[] copy = nodes.ToArray();
+            MissionTarget[] targetCopy = new MissionTarget[orderedTargets.Length];
+            Array.Copy(orderedTargets, targetCopy, orderedTargets.Length);
+            routes.Add(new RouteTemplate
+            {
+                Nodes = copy,
+                OrderedTargets = targetCopy
+            });
+        }
+
+        private List<CelestialBody> GetFlybyCandidates(CelestialBody origin, List<MissionTarget> targets)
         {
             CelestialBody central = origin.orbit.referenceBody;
-            double minSma = Math.Min(Math.Abs(origin.orbit.semiMajorAxis), Math.Abs(destination.orbit.semiMajorAxis));
-            double maxSma = Math.Max(Math.Abs(origin.orbit.semiMajorAxis), Math.Abs(destination.orbit.semiMajorAxis));
+            double minSma = Math.Abs(origin.orbit.semiMajorAxis);
+            double maxSma = minSma;
+            for (int i = 0; i < targets.Count; i++)
+            {
+                double sma = Math.Abs(targets[i].Body.orbit.semiMajorAxis);
+                minSma = Math.Min(minSma, sma);
+                maxSma = Math.Max(maxSma, sma);
+            }
+
             double lower = Math.Max(1.0, minSma * 0.42);
             double upper = Math.Max(lower * 1.1, maxSma * 1.35);
 
@@ -889,7 +1264,7 @@ namespace AutoTransferWindowPlanner
             for (int i = 0; i < bodies.Count; i++)
             {
                 CelestialBody body = bodies[i];
-                if (body == null || body.orbit == null || body.orbit.referenceBody != central || body == destination)
+                if (body == null || body.orbit == null || body.orbit.referenceBody != central)
                 {
                     continue;
                 }
@@ -940,9 +1315,10 @@ namespace AutoTransferWindowPlanner
             return result;
         }
 
-        private bool TrySearchRouteTemplate(GravityRouteSearchRequest request, CelestialBody[] route, double departUT, out TransferResult result)
+        private bool TrySearchRouteTemplate(GravityRouteSearchRequest request, RouteTemplate template, double departUT, out TransferResult result)
         {
             result = null;
+            RouteNode[] route = template.Nodes;
 
             List<RouteState> beam = new List<RouteState>();
             RouteState start = new RouteState
@@ -960,8 +1336,9 @@ namespace AutoTransferWindowPlanner
 
             for (int legIndex = 0; legIndex < route.Length - 1; legIndex++)
             {
+                RouteNode fromNode = route[legIndex];
+                RouteNode toNode = route[legIndex + 1];
                 bool isFirstLeg = legIndex == 0;
-                bool isFinalLeg = legIndex == route.Length - 2;
                 List<RouteState> nextBeam = new List<RouteState>();
 
                 for (int stateIndex = 0; stateIndex < beam.Count; stateIndex++)
@@ -974,7 +1351,7 @@ namespace AutoTransferWindowPlanner
                         continue;
                     }
 
-                    List<double> durations = GenerateLegDurations(route[legIndex], route[legIndex + 1], state.Time, maxArrivalUT, request.LegSamples);
+                    List<double> durations = GenerateLegDurations(fromNode.Body, toNode.Body, state.Time, maxArrivalUT, request.LegSamples);
                     for (int durationIndex = 0; durationIndex < durations.Count; durationIndex++)
                     {
                         double duration = durations[durationIndex];
@@ -984,39 +1361,48 @@ namespace AutoTransferWindowPlanner
                             continue;
                         }
 
-                        List<RouteLegResult> legOptions = EvaluateLambertLeg(route[legIndex], route[legIndex + 1], state.Time, duration);
+                        List<RouteLegResult> legOptions = EvaluateLambertLeg(fromNode.Body, toNode.Body, state.Time, duration);
                         for (int optionIndex = 0; optionIndex < legOptions.Count; optionIndex++)
                         {
                             RouteLegResult leg = legOptions[optionIndex];
                             double ejectionDV = state.EjectionDV;
                             double insertionDV = state.InsertionDV;
                             double flybyDV = state.FlybyDV;
-                            double addCost;
+                            double addCost = 0.0;
                             FlybyEvaluation appliedFlyby = null;
+                            CaptureEvaluation appliedCapture = null;
 
-                            if (isFirstLeg)
+                            if (isFirstLeg || (fromNode.IsMandatory && fromNode.Mode == TargetVisitMode.Capture))
                             {
-                                addCost = CircularOrbitToHyperbolaDV(route[0], request.ParkingAltitude, leg.DepartureVInf);
-                                ejectionDV += addCost;
+                                double ejection = CircularOrbitToHyperbolaDV(fromNode.Body, request.ParkingAltitude, leg.DepartureVInf);
+                                addCost += ejection;
+                                ejectionDV += ejection;
                             }
                             else
                             {
-                                FlybyEvaluation flyby = EvaluateFlyby(route[legIndex], state.IncomingVInf, leg.DepartureVInfVector);
+                                FlybyEvaluation flyby = EvaluateBestFlyby(fromNode.Body, state.IncomingVInf, leg.DepartureVInfVector, state.Time, request.UseMoonAssists);
                                 if (!flyby.IsValid)
                                 {
                                     continue;
                                 }
 
-                                addCost = flyby.PoweredDV;
-                                flybyDV += addCost;
+                                addCost += flyby.PoweredDV;
+                                flybyDV += flyby.PoweredDV;
                                 appliedFlyby = flyby;
                             }
 
-                            if (isFinalLeg && request.IncludeCapture)
+                            if (toNode.IsMandatory && toNode.Mode == TargetVisitMode.Capture)
                             {
-                                double captureDV = CircularOrbitToHyperbolaDV(route[route.Length - 1], request.CaptureAltitude, leg.ArrivalVInf);
-                                addCost += captureDV;
-                                insertionDV += captureDV;
+                                CaptureEvaluation capture = EvaluateBestCapture(toNode.Body, leg.ArrivalVInfVector, request.CaptureAltitude, leg.ArrivalUT, request.UseMoonAssists);
+                                if (!capture.IsValid)
+                                {
+                                    continue;
+                                }
+
+                                addCost += capture.TotalDV;
+                                insertionDV += capture.CaptureDV;
+                                flybyDV += capture.PoweredDV;
+                                appliedCapture = capture;
                             }
 
                             RouteState next = state.Clone();
@@ -1033,6 +1419,16 @@ namespace AutoTransferWindowPlanner
                                 previousLeg.FlybyPoweredDV = appliedFlyby.PoweredDV;
                                 previousLeg.RequiredTurnDeg = appliedFlyby.RequiredTurnDeg;
                                 previousLeg.FreeTurnDeg = appliedFlyby.FreeTurnDeg;
+                                previousLeg.FlybyAssistName = appliedFlyby.AssistName;
+                            }
+                            if (appliedCapture != null)
+                            {
+                                leg.CaptureDV = appliedCapture.CaptureDV;
+                                leg.CapturePoweredDV = appliedCapture.PoweredDV;
+                                leg.CaptureAssistName = appliedCapture.AssistName;
+                                leg.CapturePostAssistVInf = appliedCapture.PostAssistVInf;
+                                leg.CaptureTurnDeg = appliedCapture.RequiredTurnDeg;
+                                leg.CaptureFreeTurnDeg = appliedCapture.FreeTurnDeg;
                             }
                             next.Legs.Add(leg);
 
@@ -1068,13 +1464,20 @@ namespace AutoTransferWindowPlanner
             }
 
             RouteState best = beam[0];
-            CelestialBody[] routeCopy = new CelestialBody[route.Length];
+            RouteNode[] routeCopy = new RouteNode[route.Length];
             Array.Copy(route, routeCopy, route.Length);
 
+            CelestialBody[] routeBodies = new CelestialBody[routeCopy.Length];
+            for (int i = 0; i < routeCopy.Length; i++)
+            {
+                routeBodies[i] = routeCopy[i].Body;
+            }
+
+            CelestialBody finalBody = routeCopy[routeCopy.Length - 1].Body;
             result = new TransferResult
             {
                 Origin = request.Origin,
-                Destination = request.Destination,
+                Destination = finalBody,
                 DepartureUT = departUT,
                 ArrivalUT = best.Time,
                 TimeOfFlight = best.Time - departUT,
@@ -1085,7 +1488,8 @@ namespace AutoTransferWindowPlanner
                 DepartureVInf = best.Legs.Count > 0 ? best.Legs[0].DepartureVInf : 0.0,
                 ArrivalVInf = best.Legs.Count > 0 ? best.Legs[best.Legs.Count - 1].ArrivalVInf : 0.0,
                 GravityRoute = true,
-                RouteBodies = routeCopy,
+                RouteBodies = routeBodies,
+                RouteNodes = routeCopy,
                 EncounterUTs = best.Times.ToArray(),
                 RouteLegs = best.Legs.ToArray(),
                 RouteName = BuildRouteName(routeCopy)
@@ -1133,9 +1537,13 @@ namespace AutoTransferWindowPlanner
                 {
                     From = from,
                     To = to,
+                    CentralBody = central,
                     DepartUT = departUT,
                     ArrivalUT = arrivalUT,
                     TimeOfFlight = tof,
+                    StartPosition = r1,
+                    StartVelocity = transferV1,
+                    EndPosition = r2,
                     DepartureVInfVector = departureVInfVector,
                     ArrivalVInfVector = arrivalVInfVector,
                     DepartureVInf = departureVInf,
@@ -1196,12 +1604,12 @@ namespace AutoTransferWindowPlanner
             durations.Add(duration);
         }
 
-        private static double EstimateMinimumRemainingRouteTime(CelestialBody[] route, int nextBodyIndex)
+        private static double EstimateMinimumRemainingRouteTime(RouteNode[] route, int nextBodyIndex)
         {
             double total = 0.0;
             for (int i = nextBodyIndex; i < route.Length - 1; i++)
             {
-                total += Math.Max(DaySeconds() * 2.0, EstimateLegTime(route[i], route[i + 1]) * 0.28);
+                total += Math.Max(DaySeconds() * 2.0, EstimateLegTime(route[i].Body, route[i + 1].Body) * 0.28);
             }
 
             return total;
@@ -1225,6 +1633,107 @@ namespace AutoTransferWindowPlanner
             double a = 0.5 * (r1 + r2);
             double hohmann = Math.PI * Math.Sqrt(a * a * a / mu);
             return Math.Max(DaySeconds() * 5.0, hohmann);
+        }
+
+        private FlybyEvaluation EvaluateBestFlyby(CelestialBody body, Vector3d incomingVInf, Vector3d outgoingVInf, double encounterUT, bool includeMoons)
+        {
+            FlybyEvaluation best = EvaluateFlyby(body, incomingVInf, outgoingVInf);
+            best.AssistName = body.bodyName;
+
+            if (!includeMoons)
+            {
+                return best;
+            }
+
+            List<CelestialBody> moons = GetMoonsOf(body);
+            for (int moonIndex = 0; moonIndex < moons.Count; moonIndex++)
+            {
+                CelestialBody moon = moons[moonIndex];
+                for (int sample = -3; sample <= 3; sample++)
+                {
+                    double sampleUT = encounterUT + sample * Math.Max(DaySeconds() * 0.25, moon.orbit.period / 14.0);
+                    Vector3d moonVel = moon.orbit.getOrbitalVelocityAtUT(sampleUT);
+                    FlybyEvaluation moonFlyby = EvaluateFlyby(moon, incomingVInf - moonVel, outgoingVInf - moonVel);
+                    if (!moonFlyby.IsValid)
+                    {
+                        continue;
+                    }
+
+                    moonFlyby.AssistName = moon.bodyName;
+                    moonFlyby.AssistUT = sampleUT;
+                    if (moonFlyby.PoweredDV < best.PoweredDV)
+                    {
+                        best = moonFlyby;
+                    }
+                }
+            }
+
+            return best;
+        }
+
+        private CaptureEvaluation EvaluateBestCapture(CelestialBody body, Vector3d arrivalVInfVector, double captureAltitude, double encounterUT, bool includeMoons)
+        {
+            double directCapture = CircularOrbitToHyperbolaDV(body, captureAltitude, arrivalVInfVector.magnitude);
+            CaptureEvaluation best = new CaptureEvaluation
+            {
+                IsValid = IsFinite(directCapture),
+                CaptureDV = directCapture,
+                PoweredDV = 0.0,
+                TotalDV = directCapture,
+                PostAssistVInf = arrivalVInfVector.magnitude,
+                AssistName = body.bodyName
+            };
+
+            if (!includeMoons || !best.IsValid)
+            {
+                return best;
+            }
+
+            List<CelestialBody> moons = GetMoonsOf(body);
+            for (int moonIndex = 0; moonIndex < moons.Count; moonIndex++)
+            {
+                CelestialBody moon = moons[moonIndex];
+                for (int sample = -3; sample <= 3; sample++)
+                {
+                    double sampleUT = encounterUT + sample * Math.Max(DaySeconds() * 0.25, moon.orbit.period / 14.0);
+                    Vector3d moonVel = moon.orbit.getOrbitalVelocityAtUT(sampleUT);
+                    Vector3d vinMoon = arrivalVInfVector - moonVel;
+                    double vinMoonMag = vinMoon.magnitude;
+                    if (!IsFinite(vinMoonMag) || vinMoonMag <= 1e-3 || moonVel.sqrMagnitude < 1e-9)
+                    {
+                        continue;
+                    }
+
+                    Vector3d idealOutMoon = -moonVel.normalized * vinMoonMag;
+                    double requiredTurn = AngleRad(vinMoon, idealOutMoon);
+                    double freeTurn = MaxFlybyTurnAngleRad(moon, vinMoonMag);
+                    double actualTurn = Math.Min(requiredTurn, freeTurn);
+                    Vector3d outMoon = RotateToward(vinMoon, idealOutMoon, actualTurn);
+                    double powered = requiredTurn > freeTurn ? 2.0 * vinMoonMag * Math.Sin((requiredTurn - freeTurn) * 0.5) : 0.0;
+                    Vector3d postPlanetVInf = moonVel + outMoon;
+                    double postVInf = postPlanetVInf.magnitude;
+                    double captureDV = CircularOrbitToHyperbolaDV(body, captureAltitude, postVInf);
+                    double total = powered + captureDV;
+
+                    if (IsFinite(total) && total < best.TotalDV)
+                    {
+                        best = new CaptureEvaluation
+                        {
+                            IsValid = true,
+                            CaptureDV = captureDV,
+                            PoweredDV = powered,
+                            TotalDV = total,
+                            PostAssistVInf = postVInf,
+                            RequiredTurnDeg = requiredTurn * 180.0 / Math.PI,
+                            FreeTurnDeg = freeTurn * 180.0 / Math.PI,
+                            AssistName = moon.bodyName,
+                            AssistUT = sampleUT
+                        };
+                    }
+                }
+            }
+
+            return best;
         }
 
         private static FlybyEvaluation EvaluateFlyby(CelestialBody body, Vector3d incomingVInf, Vector3d outgoingVInf)
@@ -1291,17 +1800,81 @@ namespace AutoTransferWindowPlanner
             return Math.Acos(Clamp(Vector3d.Dot(a.normalized, b.normalized), -1.0, 1.0));
         }
 
-        private static string BuildRouteName(CelestialBody[] route)
+        private List<CelestialBody> GetMoonsOf(CelestialBody body)
+        {
+            List<CelestialBody> moons = new List<CelestialBody>();
+            for (int i = 0; i < bodies.Count; i++)
+            {
+                CelestialBody candidate = bodies[i];
+                if (candidate != null && candidate.orbit != null && candidate.orbit.referenceBody == body)
+                {
+                    moons.Add(candidate);
+                }
+            }
+
+            moons.Sort(delegate (CelestialBody a, CelestialBody b)
+            {
+                return Math.Abs(a.orbit.semiMajorAxis).CompareTo(Math.Abs(b.orbit.semiMajorAxis));
+            });
+
+            return moons;
+        }
+
+        private static Vector3d RotateToward(Vector3d from, Vector3d to, double angleRad)
+        {
+            if (from.sqrMagnitude < 1e-16 || to.sqrMagnitude < 1e-16 || angleRad <= 0.0)
+            {
+                return from;
+            }
+
+            double totalAngle = AngleRad(from, to);
+            if (totalAngle <= 1e-8 || angleRad >= totalAngle)
+            {
+                return to.normalized * from.magnitude;
+            }
+
+            double t = angleRad / totalAngle;
+            Vector3d a = from.normalized;
+            Vector3d b = to.normalized;
+            double sinTotal = Math.Sin(totalAngle);
+            if (Math.Abs(sinTotal) < 1e-8)
+            {
+                return (a * (1.0 - t) + b * t).normalized * from.magnitude;
+            }
+
+            Vector3d rotated =
+                a * (Math.Sin((1.0 - t) * totalAngle) / sinTotal) +
+                b * (Math.Sin(t * totalAngle) / sinTotal);
+            return rotated.normalized * from.magnitude;
+        }
+
+        private static int MaxRouteTemplateCount()
+        {
+            return 700;
+        }
+
+        private static int MaxTargetOrderCount()
+        {
+            return 24;
+        }
+
+        private static string BuildRouteName(RouteNode[] route)
         {
             if (route == null || route.Length == 0)
             {
                 return "";
             }
 
-            string text = route[0].bodyName;
+            string text = route[0].Body.bodyName;
             for (int i = 1; i < route.Length; i++)
             {
-                text += " -> " + route[i].bodyName;
+                string suffix = "";
+                if (route[i].IsMandatory)
+                {
+                    suffix = route[i].Mode == TargetVisitMode.Capture ? " (орбита)" : " (пролёт)";
+                }
+
+                text += " -> " + route[i].Body.bodyName + suffix;
             }
 
             return text;
@@ -1417,9 +1990,39 @@ namespace AutoTransferWindowPlanner
                     TimeOfFlight = tof,
                     TotalDV = total,
                     EjectionDV = ejection,
-                    InsertionDV = insertion,
+                    InsertionDV = request.IncludeCapture ? insertion : 0.0,
                     DepartureVInf = vinfDeparture,
                     ArrivalVInf = vinfArrival,
+                    RouteBodies = new[] { origin, destination },
+                    RouteNodes = new[]
+                    {
+                        new RouteNode { Body = origin, Mode = TargetVisitMode.Flyby, IsMandatory = true, TargetIndex = -1 },
+                        new RouteNode { Body = destination, Mode = request.IncludeCapture ? TargetVisitMode.Capture : TargetVisitMode.Flyby, IsMandatory = true, TargetIndex = 0 }
+                    },
+                    EncounterUTs = new[] { departUT, arrivalUT },
+                    RouteLegs = new[]
+                    {
+                        new RouteLegResult
+                        {
+                            From = origin,
+                            To = destination,
+                            CentralBody = central,
+                            DepartUT = departUT,
+                            ArrivalUT = arrivalUT,
+                            TimeOfFlight = tof,
+                            StartPosition = r1,
+                            StartVelocity = transferV1,
+                            EndPosition = r2,
+                            DepartureVInfVector = vinfDepartureVector,
+                            ArrivalVInfVector = vinfArrivalVector,
+                            DepartureVInf = vinfDeparture,
+                            ArrivalVInf = vinfArrival,
+                            CaptureDV = request.IncludeCapture ? insertion : 0.0,
+                            CapturePostAssistVInf = vinfArrival,
+                            CaptureAssistName = request.IncludeCapture ? destination.bodyName : null,
+                            LongWay = longWay
+                        }
+                    },
                     LongWay = longWay,
                     PhaseAngleDeg = SignedAngleDeg(r1, destination.orbit.getRelativePositionAtUT(departUT), SafeNormal(r1, originVel)),
                     EjectionAngleDeg = SignedAngleDeg(originVel, vinfDepartureVector, SafeNormal(r1, originVel)),
@@ -1530,6 +2133,175 @@ namespace AutoTransferWindowPlanner
             porkchopTexture.SetPixel(x, y, color);
         }
 
+        private bool IsMapOverlayScene()
+        {
+            return HighLogic.LoadedScene == GameScenes.TRACKSTATION ||
+                   HighLogic.LoadedScene == GameScenes.FLIGHT ||
+                   (MapView.MapIsEnabled);
+        }
+
+        private void BuildTrajectoryOverlay(TransferResult result)
+        {
+            ClearTrajectoryOverlay();
+            if (!showTrajectoryOverlay || result == null || result.RouteLegs == null || result.RouteLegs.Length == 0 || !IsMapOverlayScene())
+            {
+                return;
+            }
+
+            trajectoryOverlayRoot = new GameObject("AutoTransferWindowPlanner_TrajectoryOverlay");
+            overlayResult = result;
+
+            for (int i = 0; i < result.RouteLegs.Length; i++)
+            {
+                AddTrajectoryLegOverlay(result.RouteLegs[i], i);
+            }
+
+            if (result.RouteBodies != null && result.EncounterUTs != null)
+            {
+                int count = Math.Min(result.RouteBodies.Length, result.EncounterUTs.Length);
+                for (int i = 0; i < count; i++)
+                {
+                    AddGhostMarker(result.RouteBodies[i], result.EncounterUTs[i], i);
+                }
+            }
+        }
+
+        private void ClearTrajectoryOverlay()
+        {
+            if (trajectoryOverlayRoot != null)
+            {
+                Destroy(trajectoryOverlayRoot);
+                trajectoryOverlayRoot = null;
+            }
+
+            overlayResult = null;
+        }
+
+        private void AddTrajectoryLegOverlay(RouteLegResult leg, int legIndex)
+        {
+            if (trajectoryOverlayRoot == null || leg.CentralBody == null)
+            {
+                return;
+            }
+
+            Orbit orbit = new Orbit();
+            orbit.UpdateFromStateVectors(leg.StartPosition, leg.StartVelocity, leg.CentralBody, leg.DepartUT);
+
+            int samples = 72;
+            Vector3? previous = null;
+            for (int i = 0; i < samples; i++)
+            {
+                double t = i / (double)(samples - 1);
+                double ut = leg.DepartUT + leg.TimeOfFlight * t;
+                Vector3d relativePosition = orbit.getRelativePositionAtUT(ut);
+                Vector3d localPosition = GetBodyLocalPositionAtUT(leg.CentralBody, ut) + relativePosition;
+                Vector3 scaledPosition = ToScaledVector3(localPosition);
+
+                if (previous.HasValue && (i % 3) != 0)
+                {
+                    AddLineSegment(previous.Value, scaledPosition, legIndex, i);
+                }
+
+                previous = scaledPosition;
+            }
+        }
+
+        private void AddLineSegment(Vector3 start, Vector3 end, int legIndex, int segmentIndex)
+        {
+            GameObject segment = new GameObject("ATWP_leg_" + legIndex + "_dash_" + segmentIndex);
+            segment.transform.parent = trajectoryOverlayRoot.transform;
+            LineRenderer line = segment.AddComponent<LineRenderer>();
+            line.useWorldSpace = true;
+            line.material = GetTrajectoryLineMaterial();
+            line.startColor = new Color(0.2f, 0.95f, 1.0f, 0.85f);
+            line.endColor = new Color(1.0f, 0.85f, 0.15f, 0.85f);
+            line.startWidth = 4f;
+            line.endWidth = 4f;
+            line.positionCount = 2;
+            line.SetPosition(0, start);
+            line.SetPosition(1, end);
+        }
+
+        private void AddGhostMarker(CelestialBody body, double ut, int index)
+        {
+            if (trajectoryOverlayRoot == null || body == null)
+            {
+                return;
+            }
+
+            GameObject marker = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            marker.name = "ATWP_ghost_" + body.bodyName + "_" + index;
+            marker.transform.parent = trajectoryOverlayRoot.transform;
+            marker.transform.position = ToScaledVector3(GetBodyLocalPositionAtUT(body, ut));
+            float scaledRadius = Mathf.Clamp((float)(body.Radius * ScaledSpace.ScaleFactor * 2.8), 14f, 70f);
+            marker.transform.localScale = new Vector3(scaledRadius, scaledRadius, scaledRadius);
+
+            Collider markerCollider = marker.GetComponent<Collider>();
+            if (markerCollider != null)
+            {
+                Destroy(markerCollider);
+            }
+
+            Renderer renderer = marker.GetComponent<Renderer>();
+            if (renderer != null)
+            {
+                renderer.material = GetTrajectoryMarkerMaterial();
+            }
+        }
+
+        private Material GetTrajectoryLineMaterial()
+        {
+            if (trajectoryLineMaterial != null)
+            {
+                return trajectoryLineMaterial;
+            }
+
+            Shader shader = Shader.Find("Particles/Additive");
+            if (shader == null) shader = Shader.Find("Legacy Shaders/Particles/Additive");
+            if (shader == null) shader = Shader.Find("Unlit/Color");
+            trajectoryLineMaterial = new Material(shader);
+            trajectoryLineMaterial.color = new Color(0.2f, 0.95f, 1.0f, 0.85f);
+            return trajectoryLineMaterial;
+        }
+
+        private Material GetTrajectoryMarkerMaterial()
+        {
+            if (trajectoryMarkerMaterial != null)
+            {
+                return trajectoryMarkerMaterial;
+            }
+
+            Shader shader = Shader.Find("Particles/Additive");
+            if (shader == null) shader = Shader.Find("Legacy Shaders/Particles/Additive");
+            if (shader == null) shader = Shader.Find("Unlit/Color");
+            trajectoryMarkerMaterial = new Material(shader);
+            trajectoryMarkerMaterial.color = new Color(1.0f, 0.95f, 0.2f, 0.75f);
+            return trajectoryMarkerMaterial;
+        }
+
+        private static Vector3 ToScaledVector3(Vector3d localPosition)
+        {
+            Vector3d scaled = ScaledSpace.LocalToScaledSpace(localPosition);
+            return new Vector3((float)scaled.x, (float)scaled.y, (float)scaled.z);
+        }
+
+        private static Vector3d GetBodyLocalPositionAtUT(CelestialBody body, double ut)
+        {
+            if (body == null || body.orbit == null)
+            {
+                return Vector3d.zero;
+            }
+
+            Vector3d position = body.orbit.getRelativePositionAtUT(ut);
+            CelestialBody parent = body.orbit.referenceBody;
+            if (parent != null && parent.orbit != null)
+            {
+                position += GetBodyLocalPositionAtUT(parent, ut);
+            }
+
+            return position;
+        }
+
         private void RefreshBodies(bool resetSelection)
         {
             if (FlightGlobals.Bodies == null)
@@ -1539,10 +2311,17 @@ namespace AutoTransferWindowPlanner
 
             CelestialBody previousOrigin = null;
             CelestialBody previousDestination = null;
+            List<CelestialBody> previousTargetBodies = new List<CelestialBody>();
+            List<TargetVisitMode> previousTargetModes = new List<TargetVisitMode>();
             if (bodies.Count > 0)
             {
                 previousOrigin = bodies[WrapIndex(originIndex, bodies.Count)];
                 previousDestination = bodies[WrapIndex(destinationIndex, bodies.Count)];
+                for (int i = 0; i < missionTargets.Count; i++)
+                {
+                    previousTargetBodies.Add(bodies[WrapIndex(missionTargets[i].BodyIndex, bodies.Count)]);
+                    previousTargetModes.Add(missionTargets[i].Mode);
+                }
             }
 
             bodies.Clear();
@@ -1594,6 +2373,27 @@ namespace AutoTransferWindowPlanner
                 {
                     destinationIndex = WrapIndex(originIndex + 1, bodies.Count);
                 }
+            }
+
+            if (previousTargetBodies.Count > 0)
+            {
+                missionTargets.Clear();
+                for (int i = 0; i < previousTargetBodies.Count; i++)
+                {
+                    int restoredIndex = bodies.IndexOf(previousTargetBodies[i]);
+                    if (restoredIndex < 0)
+                    {
+                        restoredIndex = WrapIndex(destinationIndex, bodies.Count);
+                    }
+
+                    missionTargets.Add(new TargetSelection
+                    {
+                        BodyIndex = restoredIndex,
+                        Mode = previousTargetModes[i]
+                    });
+                }
+                selectedTargetIndex = Mathf.Clamp(selectedTargetIndex, 0, missionTargets.Count - 1);
+                SyncDestinationFromTargets();
             }
         }
 
@@ -1937,6 +2737,39 @@ namespace AutoTransferWindowPlanner
             public double SemiMajorAxis;
         }
 
+        private enum TargetVisitMode
+        {
+            Flyby,
+            Capture
+        }
+
+        private struct TargetSelection
+        {
+            public int BodyIndex;
+            public TargetVisitMode Mode;
+        }
+
+        private sealed class MissionTarget
+        {
+            public CelestialBody Body;
+            public TargetVisitMode Mode;
+            public int OriginalIndex;
+        }
+
+        private struct RouteNode
+        {
+            public CelestialBody Body;
+            public TargetVisitMode Mode;
+            public bool IsMandatory;
+            public int TargetIndex;
+        }
+
+        private sealed class RouteTemplate
+        {
+            public RouteNode[] Nodes;
+            public MissionTarget[] OrderedTargets;
+        }
+
         private sealed class SearchRequest
         {
             public CelestialBody Origin;
@@ -1956,6 +2789,8 @@ namespace AutoTransferWindowPlanner
         {
             public CelestialBody Origin;
             public CelestialBody Destination;
+            public List<MissionTarget> Targets;
+            public bool AutoTargetOrder;
             public double ParkingAltitude;
             public double CaptureAltitude;
             public double StartUT;
@@ -1966,6 +2801,7 @@ namespace AutoTransferWindowPlanner
             public int LegSamples;
             public int BeamWidth;
             public bool IncludeCapture;
+            public bool UseMoonAssists;
         }
 
         private sealed class FlybyEvaluation
@@ -1974,15 +2810,34 @@ namespace AutoTransferWindowPlanner
             public double PoweredDV;
             public double RequiredTurnDeg;
             public double FreeTurnDeg;
+            public string AssistName;
+            public double AssistUT;
+        }
+
+        private sealed class CaptureEvaluation
+        {
+            public bool IsValid;
+            public double CaptureDV;
+            public double PoweredDV;
+            public double TotalDV;
+            public double PostAssistVInf;
+            public double RequiredTurnDeg;
+            public double FreeTurnDeg;
+            public string AssistName;
+            public double AssistUT;
         }
 
         private sealed class RouteLegResult
         {
             public CelestialBody From;
             public CelestialBody To;
+            public CelestialBody CentralBody;
             public double DepartUT;
             public double ArrivalUT;
             public double TimeOfFlight;
+            public Vector3d StartPosition;
+            public Vector3d StartVelocity;
+            public Vector3d EndPosition;
             public Vector3d DepartureVInfVector;
             public Vector3d ArrivalVInfVector;
             public double DepartureVInf;
@@ -1990,6 +2845,13 @@ namespace AutoTransferWindowPlanner
             public double FlybyPoweredDV;
             public double RequiredTurnDeg;
             public double FreeTurnDeg;
+            public string FlybyAssistName;
+            public double CaptureDV;
+            public double CapturePoweredDV;
+            public double CapturePostAssistVInf;
+            public double CaptureTurnDeg;
+            public double CaptureFreeTurnDeg;
+            public string CaptureAssistName;
             public bool LongWay;
 
             public RouteLegResult Clone()
@@ -1998,9 +2860,13 @@ namespace AutoTransferWindowPlanner
                 {
                     From = From,
                     To = To,
+                    CentralBody = CentralBody,
                     DepartUT = DepartUT,
                     ArrivalUT = ArrivalUT,
                     TimeOfFlight = TimeOfFlight,
+                    StartPosition = StartPosition,
+                    StartVelocity = StartVelocity,
+                    EndPosition = EndPosition,
                     DepartureVInfVector = DepartureVInfVector,
                     ArrivalVInfVector = ArrivalVInfVector,
                     DepartureVInf = DepartureVInf,
@@ -2008,6 +2874,13 @@ namespace AutoTransferWindowPlanner
                     FlybyPoweredDV = FlybyPoweredDV,
                     RequiredTurnDeg = RequiredTurnDeg,
                     FreeTurnDeg = FreeTurnDeg,
+                    FlybyAssistName = FlybyAssistName,
+                    CaptureDV = CaptureDV,
+                    CapturePoweredDV = CapturePoweredDV,
+                    CapturePostAssistVInf = CapturePostAssistVInf,
+                    CaptureTurnDeg = CaptureTurnDeg,
+                    CaptureFreeTurnDeg = CaptureFreeTurnDeg,
+                    CaptureAssistName = CaptureAssistName,
                     LongWay = LongWay
                 };
             }
@@ -2066,6 +2939,7 @@ namespace AutoTransferWindowPlanner
             public bool GravityRoute;
             public bool LongWay;
             public CelestialBody[] RouteBodies;
+            public RouteNode[] RouteNodes;
             public double[] EncounterUTs;
             public RouteLegResult[] RouteLegs;
             public string RouteName;

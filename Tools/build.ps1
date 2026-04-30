@@ -6,6 +6,9 @@ param(
     [string]$OutputDir = "",
 
     [Parameter(Mandatory=$false)]
+    [string]$InstallGameDataPath = "",
+
+    [Parameter(Mandatory=$false)]
     [switch]$NoInstall,
 
     [Parameter(Mandatory=$false)]
@@ -70,6 +73,11 @@ function Find-KspPath {
     }
 
     foreach ($libraryPath in Get-SteamLibraryPaths) {
+        $commonPath = Join-Path $libraryPath "steamapps\common"
+        if (Test-Path $commonPath) {
+            Get-ChildItem -LiteralPath $commonPath -Directory -Filter "Kerbal Space Program*test" -ErrorAction SilentlyContinue |
+                ForEach-Object { [void]$candidates.Add($_.FullName) }
+        }
         [void]$candidates.Add((Join-Path $libraryPath "steamapps\common\Kerbal Space Program"))
     }
 
@@ -295,14 +303,34 @@ if (-not $NoZip) {
 }
 
 if (-not $NoInstall) {
-    $targetGameData = Join-Path $ksp.KspPath "GameData"
+    $defaultTestGameData = ""
+    $defaultSteamCommon = "F:\SteamLibrary\steamapps\common"
+    if (Test-Path $defaultSteamCommon) {
+        $defaultTestKsp = Get-ChildItem -LiteralPath $defaultSteamCommon -Directory -Filter "Kerbal Space Program*test" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($defaultTestKsp) {
+            $defaultTestGameData = Join-Path $defaultTestKsp.FullName "GameData"
+        }
+    }
+    if ($InstallGameDataPath) {
+        $targetGameData = $InstallGameDataPath
+    } elseif ($defaultTestGameData -and (Test-Path $defaultTestGameData)) {
+        $targetGameData = $defaultTestGameData
+    } else {
+        $targetGameData = Join-Path $ksp.KspPath "GameData"
+    }
+
     if (-not (Test-Path $targetGameData)) {
         Write-Host "KSP GameData folder was not found: $targetGameData" -ForegroundColor Yellow
         exit 1
     }
 
+    $targetModPath = Join-Path $targetGameData $modName
+    if (Test-Path $targetModPath) {
+        Remove-Item -LiteralPath $targetModPath -Recurse -Force
+    }
+
     Copy-Item -LiteralPath $packagedModGameData -Destination $targetGameData -Recurse -Force
-    Write-Host "Installed to: $(Join-Path $targetGameData $modName)" -ForegroundColor Green
+    Write-Host "Installed to: $targetModPath" -ForegroundColor Green
 }
 
 Write-Host "Done: $pluginDll" -ForegroundColor Green
