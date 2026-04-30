@@ -42,6 +42,9 @@ namespace AutoTransferWindowPlanner
         private string earliestLeadDays = "0";
         private string tofMinDays = "";
         private string tofMaxDays = "";
+        private string maxMissionYears = "8";
+        private string maxFlybys = "3";
+        private bool gravityAssistMode = true;
         private bool autoTof = true;
         private bool includeCapture = true;
 
@@ -276,6 +279,14 @@ namespace AutoTransferWindowPlanner
             DrawTextFieldRow("Искать ближайшие, лет", ref searchYears);
 
             GUILayout.Space(6f);
+            gravityAssistMode = GUILayout.Toggle(gravityAssistMode, "Авто маршрут через flyby");
+            GUI.enabled = gravityAssistMode;
+            DrawTextFieldRow("Макс. время полёта, лет", ref maxMissionYears);
+            DrawTextFieldRow("Макс. пролётов планет", ref maxFlybys);
+            GUI.enabled = true;
+
+            GUILayout.Space(6f);
+            GUI.enabled = !gravityAssistMode;
             GUILayout.BeginHorizontal();
             autoTof = GUILayout.Toggle(autoTof, "Авто время полёта", GUILayout.Width(170f));
             if (GUILayout.Button("?", GUILayout.Width(28f)))
@@ -284,7 +295,7 @@ namespace AutoTransferWindowPlanner
             }
             GUILayout.EndHorizontal();
 
-            GUI.enabled = !autoTof;
+            GUI.enabled = !gravityAssistMode && !autoTof;
             DrawTextFieldRow("TOF min, дней", ref tofMinDays);
             DrawTextFieldRow("TOF max, дней", ref tofMaxDays);
             GUI.enabled = true;
@@ -311,7 +322,7 @@ namespace AutoTransferWindowPlanner
             }
             else
             {
-                if (GUILayout.Button("Искать окно", GUILayout.Height(34f)))
+                if (GUILayout.Button(gravityAssistMode ? "Искать маршрут" : "Искать окно", GUILayout.Height(34f)))
                 {
                     BeginSearch();
                 }
@@ -324,8 +335,8 @@ namespace AutoTransferWindowPlanner
             GUILayout.Space(6f);
             GUILayout.Label("Поддержка:");
             GUILayout.TextArea(
-                "Работает для тел с одним родительским телом: например Kerbin -> Duna, Eve -> Kerbin, Jool -> Eeloo. " +
-                "Перелёты Kerbin -> Mun пока не считаются, потому что это другая задача: луна вращается вокруг Kerbin, а Kerbin вокруг Sun.",
+                "Прямой режим считает обычный Lambert-перелёт. Авто маршрут перебирает цепочки через планеты с тем же родителем, " +
+                "оценивает гравитационные пролёты и добавляет штраф Δv, если планета не может бесплатно повернуть v∞ на нужный угол.",
                 GUILayout.Height(85f));
 
             GUILayout.EndVertical();
@@ -416,6 +427,11 @@ namespace AutoTransferWindowPlanner
                 return "Пока результата нет. Нажми «Искать окно».";
             }
 
+            if (bestResult.GravityRoute && bestResult.RouteBodies != null && bestResult.RouteLegs != null)
+            {
+                return BuildGravityRouteResultText(bestResult);
+            }
+
             string longWayText = bestResult.LongWay ? "да" : "нет";
             string captureLine = includeCapture
                 ? "Δv захвата:       " + FormatDV(bestResult.InsertionDV) + "\n"
@@ -441,6 +457,68 @@ namespace AutoTransferWindowPlanner
                 "Long way:         " + longWayText + "\n" +
                 "\n" +
                 "Примечание: это оценка patched-conics. Атмосфера, плоскость стартовой площадки, наклон парковочной орбиты, аэроторможение и mid-course corrections здесь не моделируются.";
+        }
+
+        private string BuildGravityRouteResultText(TransferResult result)
+        {
+            string text =
+                "Авто маршрут с гравитационными манёврами\n" +
+                result.RouteName + "\n" +
+                "\n" +
+                "Старт:              " + FormatUT(result.DepartureUT) + "\n" +
+                "Финиш:              " + FormatUT(result.ArrivalUT) + "\n" +
+                "Время полёта:       " + FormatDuration(result.TimeOfFlight) + "\n" +
+                "\n" +
+                "Итого Δv:           " + FormatDV(result.TotalDV) + "\n" +
+                "Δv вылета:          " + FormatDV(result.EjectionDV) + "\n" +
+                "Δv powered flyby:   " + FormatDV(result.FlybyDV) + "\n";
+
+            if (includeCapture)
+            {
+                text += "Δv захвата:         " + FormatDV(result.InsertionDV) + "\n";
+            }
+            else
+            {
+                text += "Δv захвата:         не включено\n";
+            }
+
+            text +=
+                "v∞ старта:          " + FormatSpeed(result.DepartureVInf) + "\n" +
+                "v∞ прибытия:        " + FormatSpeed(result.ArrivalVInf) + "\n" +
+                "\n" +
+                "Узлы маршрута:\n";
+
+            for (int i = 0; i < result.RouteBodies.Length; i++)
+            {
+                double ut = result.EncounterUTs != null && i < result.EncounterUTs.Length ? result.EncounterUTs[i] : result.DepartureUT;
+                text += "  " + (i + 1) + ". " + result.RouteBodies[i].bodyName + " — " + FormatUT(ut) + "\n";
+            }
+
+            text += "\nУчастки:\n";
+            for (int i = 0; i < result.RouteLegs.Length; i++)
+            {
+                RouteLegResult leg = result.RouteLegs[i];
+                text +=
+                    "  " + leg.From.bodyName + " -> " + leg.To.bodyName +
+                    " / " + FormatDuration(leg.TimeOfFlight) +
+                    " / v∞ " + FormatSpeed(leg.DepartureVInf) + " -> " + FormatSpeed(leg.ArrivalVInf);
+
+                if (i < result.RouteLegs.Length - 1)
+                {
+                    text +=
+                        " / flyby Δv " + FormatDV(leg.FlybyPoweredDV) +
+                        " / поворот " + FormatAngle(leg.RequiredTurnDeg) +
+                        " из " + FormatAngle(leg.FreeTurnDeg);
+                }
+
+                text += "\n";
+            }
+
+            text +=
+                "\nПримечание: это поисковая оценка patched-conics. Бесплатный flyby засчитывается, если планета может повернуть v∞ на нужный угол на безопасной высоте пролёта. " +
+                "Если не может, добавляется оценочный powered-flyby штраф Δv. Точная миссия всё равно требует ручной донастройки maneuver nodes.";
+
+            return text;
         }
 
         private void BeginSearch()
@@ -480,6 +558,51 @@ namespace AutoTransferWindowPlanner
             double years = Math.Max(0.02, ParseDouble(searchYears, 5.0));
             double searchSpan = years * YearSeconds();
             double startUT = Planetarium.GetUniversalTime() + lead;
+
+            if (gravityAssistMode)
+            {
+                int routeDepartSamples;
+                int legSamples;
+                int beamWidth;
+                GetGravityAssistQualitySamples(out routeDepartSamples, out legSamples, out beamWidth);
+
+                int assistLimit = Math.Max(0, Math.Min(4, (int)Math.Round(ParseDouble(maxFlybys, 3.0))));
+                double maxFlight = Math.Max(DaySeconds() * 30.0, ParseDouble(maxMissionYears, 8.0) * YearSeconds());
+
+                bestResult = null;
+                dvGrid = null;
+                bestGridI = -1;
+                bestGridJ = -1;
+                searchProgress = 0f;
+                cancelSearch = false;
+                searchRunning = true;
+                statusText = "Начинаю поиск маршрута с гравитационными манёврами...";
+
+                if (porkchopTexture != null)
+                {
+                    Destroy(porkchopTexture);
+                    porkchopTexture = null;
+                }
+
+                GravityRouteSearchRequest routeRequest = new GravityRouteSearchRequest
+                {
+                    Origin = origin,
+                    Destination = destination,
+                    ParkingAltitude = Math.Max(0.0, parkingAlt),
+                    CaptureAltitude = Math.Max(0.0, captureAlt),
+                    StartUT = startUT,
+                    SearchSpan = searchSpan,
+                    MaxMissionTime = maxFlight,
+                    MaxFlybys = assistLimit,
+                    DepartSamples = routeDepartSamples,
+                    LegSamples = legSamples,
+                    BeamWidth = beamWidth,
+                    IncludeCapture = includeCapture
+                };
+
+                StartCoroutine(SearchGravityRouteCoroutine(routeRequest));
+                return;
+            }
 
             double minTof;
             double maxTof;
@@ -614,6 +737,574 @@ namespace AutoTransferWindowPlanner
             BuildPorkchopTexture();
             searchProgress = 1f;
             searchRunning = false;
+        }
+
+        private IEnumerator SearchGravityRouteCoroutine(GravityRouteSearchRequest request)
+        {
+            List<CelestialBody[]> routeTemplates = BuildRouteTemplates(request);
+            if (routeTemplates.Count == 0)
+            {
+                statusText = "Не удалось собрать список маршрутов для этих тел.";
+                searchProgress = 1f;
+                searchRunning = false;
+                yield break;
+            }
+
+            TransferResult best = null;
+            double bestScore = double.PositiveInfinity;
+            int evalCount = 0;
+            int totalCount = Math.Max(1, routeTemplates.Count * request.DepartSamples);
+
+            statusText = "Маршрутов: " + routeTemplates.Count + ". Ищу цепочку flyby...";
+
+            for (int i = 0; i < request.DepartSamples; i++)
+            {
+                if (cancelSearch)
+                {
+                    break;
+                }
+
+                double departUT = request.StartUT + request.SearchSpan * i / Math.Max(1, request.DepartSamples - 1);
+
+                for (int routeIndex = 0; routeIndex < routeTemplates.Count; routeIndex++)
+                {
+                    if (cancelSearch)
+                    {
+                        break;
+                    }
+
+                    TransferResult candidate;
+                    if (TrySearchRouteTemplate(request, routeTemplates[routeIndex], departUT, out candidate))
+                    {
+                        if (candidate.TotalDV < bestScore)
+                        {
+                            bestScore = candidate.TotalDV;
+                            best = candidate;
+                            statusText = "Лучший маршрут: " + candidate.RouteName + " / " + FormatDV(candidate.TotalDV);
+                        }
+                    }
+
+                    evalCount++;
+                    if ((evalCount & 15) == 0)
+                    {
+                        searchProgress = 0.96f * evalCount / totalCount;
+                        yield return null;
+                    }
+                }
+            }
+
+            if (!cancelSearch && best != null)
+            {
+                bestResult = best;
+                statusText = "Готово. Лучший маршрут: " + best.RouteName + " / " + FormatDV(best.TotalDV) + ".";
+            }
+            else if (cancelSearch)
+            {
+                statusText = "Поиск остановлен.";
+            }
+            else
+            {
+                statusText = "Маршрут не найден. Увеличь максимальное время полёта, годы поиска или число пролётов.";
+            }
+
+            searchProgress = 1f;
+            searchRunning = false;
+        }
+
+        private List<CelestialBody[]> BuildRouteTemplates(GravityRouteSearchRequest request)
+        {
+            List<CelestialBody[]> routes = new List<CelestialBody[]>();
+            List<CelestialBody> flybyCandidates = GetFlybyCandidates(request.Origin, request.Destination);
+
+            routes.Add(new[] { request.Origin, request.Destination });
+
+            int maxFlybysRequested = Math.Max(0, request.MaxFlybys);
+            List<CelestialBody> current = new List<CelestialBody>();
+            for (int flybyCount = 1; flybyCount <= maxFlybysRequested; flybyCount++)
+            {
+                BuildRouteTemplatesRecursive(request, flybyCandidates, flybyCount, current, routes);
+            }
+
+            return routes;
+        }
+
+        private void BuildRouteTemplatesRecursive(
+            GravityRouteSearchRequest request,
+            List<CelestialBody> flybyCandidates,
+            int flybysLeft,
+            List<CelestialBody> current,
+            List<CelestialBody[]> routes)
+        {
+            if (flybysLeft == 0)
+            {
+                CelestialBody[] route = new CelestialBody[current.Count + 2];
+                route[0] = request.Origin;
+                for (int i = 0; i < current.Count; i++)
+                {
+                    route[i + 1] = current[i];
+                }
+                route[route.Length - 1] = request.Destination;
+                routes.Add(route);
+                return;
+            }
+
+            for (int i = 0; i < flybyCandidates.Count; i++)
+            {
+                CelestialBody body = flybyCandidates[i];
+                if (body == request.Destination)
+                {
+                    continue;
+                }
+
+                int countSameAtEnd = 0;
+                for (int j = current.Count - 1; j >= 0; j--)
+                {
+                    if (current[j] != body)
+                    {
+                        break;
+                    }
+                    countSameAtEnd++;
+                }
+
+                if (countSameAtEnd >= 2)
+                {
+                    continue;
+                }
+
+                current.Add(body);
+                BuildRouteTemplatesRecursive(request, flybyCandidates, flybysLeft - 1, current, routes);
+                current.RemoveAt(current.Count - 1);
+            }
+        }
+
+        private List<CelestialBody> GetFlybyCandidates(CelestialBody origin, CelestialBody destination)
+        {
+            CelestialBody central = origin.orbit.referenceBody;
+            double minSma = Math.Min(Math.Abs(origin.orbit.semiMajorAxis), Math.Abs(destination.orbit.semiMajorAxis));
+            double maxSma = Math.Max(Math.Abs(origin.orbit.semiMajorAxis), Math.Abs(destination.orbit.semiMajorAxis));
+            double lower = Math.Max(1.0, minSma * 0.42);
+            double upper = Math.Max(lower * 1.1, maxSma * 1.35);
+
+            List<CandidateBody> candidates = new List<CandidateBody>();
+            for (int i = 0; i < bodies.Count; i++)
+            {
+                CelestialBody body = bodies[i];
+                if (body == null || body.orbit == null || body.orbit.referenceBody != central || body == destination)
+                {
+                    continue;
+                }
+
+                double sma = Math.Abs(body.orbit.semiMajorAxis);
+                if (!IsFinite(sma) || sma <= 0.0)
+                {
+                    continue;
+                }
+
+                double score = 0.0;
+                if (sma < lower)
+                {
+                    score = Math.Abs(Math.Log(lower / sma));
+                }
+                else if (sma > upper)
+                {
+                    score = Math.Abs(Math.Log(sma / upper));
+                }
+
+                if (body == origin)
+                {
+                    score -= 0.25;
+                }
+
+                candidates.Add(new CandidateBody { Body = body, Score = score, SemiMajorAxis = sma });
+            }
+
+            candidates.Sort(delegate (CandidateBody a, CandidateBody b)
+            {
+                int scoreCompare = a.Score.CompareTo(b.Score);
+                if (scoreCompare != 0) return scoreCompare;
+                return a.SemiMajorAxis.CompareTo(b.SemiMajorAxis);
+            });
+
+            List<CelestialBody> result = new List<CelestialBody>();
+            int limit = Math.Min(7, candidates.Count);
+            for (int i = 0; i < limit; i++)
+            {
+                result.Add(candidates[i].Body);
+            }
+
+            if (!result.Contains(origin))
+            {
+                result.Insert(0, origin);
+            }
+
+            return result;
+        }
+
+        private bool TrySearchRouteTemplate(GravityRouteSearchRequest request, CelestialBody[] route, double departUT, out TransferResult result)
+        {
+            result = null;
+
+            List<RouteState> beam = new List<RouteState>();
+            RouteState start = new RouteState
+            {
+                Time = departUT,
+                Cost = 0.0,
+                EjectionDV = 0.0,
+                InsertionDV = 0.0,
+                FlybyDV = 0.0,
+                IncomingVInf = new Vector3d(0.0, 0.0, 0.0),
+                Times = new List<double> { departUT },
+                Legs = new List<RouteLegResult>()
+            };
+            beam.Add(start);
+
+            for (int legIndex = 0; legIndex < route.Length - 1; legIndex++)
+            {
+                bool isFirstLeg = legIndex == 0;
+                bool isFinalLeg = legIndex == route.Length - 2;
+                List<RouteState> nextBeam = new List<RouteState>();
+
+                for (int stateIndex = 0; stateIndex < beam.Count; stateIndex++)
+                {
+                    RouteState state = beam[stateIndex];
+                    double minRemaining = EstimateMinimumRemainingRouteTime(route, legIndex + 1);
+                    double maxArrivalUT = departUT + request.MaxMissionTime - minRemaining;
+                    if (maxArrivalUT <= state.Time + DaySeconds())
+                    {
+                        continue;
+                    }
+
+                    List<double> durations = GenerateLegDurations(route[legIndex], route[legIndex + 1], state.Time, maxArrivalUT, request.LegSamples);
+                    for (int durationIndex = 0; durationIndex < durations.Count; durationIndex++)
+                    {
+                        double duration = durations[durationIndex];
+                        double arrivalUT = state.Time + duration;
+                        if (arrivalUT > maxArrivalUT)
+                        {
+                            continue;
+                        }
+
+                        List<RouteLegResult> legOptions = EvaluateLambertLeg(route[legIndex], route[legIndex + 1], state.Time, duration);
+                        for (int optionIndex = 0; optionIndex < legOptions.Count; optionIndex++)
+                        {
+                            RouteLegResult leg = legOptions[optionIndex];
+                            double ejectionDV = state.EjectionDV;
+                            double insertionDV = state.InsertionDV;
+                            double flybyDV = state.FlybyDV;
+                            double addCost;
+                            FlybyEvaluation appliedFlyby = null;
+
+                            if (isFirstLeg)
+                            {
+                                addCost = CircularOrbitToHyperbolaDV(route[0], request.ParkingAltitude, leg.DepartureVInf);
+                                ejectionDV += addCost;
+                            }
+                            else
+                            {
+                                FlybyEvaluation flyby = EvaluateFlyby(route[legIndex], state.IncomingVInf, leg.DepartureVInfVector);
+                                if (!flyby.IsValid)
+                                {
+                                    continue;
+                                }
+
+                                addCost = flyby.PoweredDV;
+                                flybyDV += addCost;
+                                appliedFlyby = flyby;
+                            }
+
+                            if (isFinalLeg && request.IncludeCapture)
+                            {
+                                double captureDV = CircularOrbitToHyperbolaDV(route[route.Length - 1], request.CaptureAltitude, leg.ArrivalVInf);
+                                addCost += captureDV;
+                                insertionDV += captureDV;
+                            }
+
+                            RouteState next = state.Clone();
+                            next.Time = arrivalUT;
+                            next.Cost = state.Cost + addCost;
+                            next.EjectionDV = ejectionDV;
+                            next.InsertionDV = insertionDV;
+                            next.FlybyDV = flybyDV;
+                            next.IncomingVInf = leg.ArrivalVInfVector;
+                            next.Times.Add(arrivalUT);
+                            if (appliedFlyby != null && next.Legs.Count > 0)
+                            {
+                                RouteLegResult previousLeg = next.Legs[next.Legs.Count - 1];
+                                previousLeg.FlybyPoweredDV = appliedFlyby.PoweredDV;
+                                previousLeg.RequiredTurnDeg = appliedFlyby.RequiredTurnDeg;
+                                previousLeg.FreeTurnDeg = appliedFlyby.FreeTurnDeg;
+                            }
+                            next.Legs.Add(leg);
+
+                            if (IsFinite(next.Cost))
+                            {
+                                nextBeam.Add(next);
+                            }
+                        }
+                    }
+                }
+
+                if (nextBeam.Count == 0)
+                {
+                    return false;
+                }
+
+                nextBeam.Sort(delegate (RouteState a, RouteState b)
+                {
+                    return a.Cost.CompareTo(b.Cost);
+                });
+
+                if (nextBeam.Count > request.BeamWidth)
+                {
+                    nextBeam.RemoveRange(request.BeamWidth, nextBeam.Count - request.BeamWidth);
+                }
+
+                beam = nextBeam;
+            }
+
+            if (beam.Count == 0)
+            {
+                return false;
+            }
+
+            RouteState best = beam[0];
+            CelestialBody[] routeCopy = new CelestialBody[route.Length];
+            Array.Copy(route, routeCopy, route.Length);
+
+            result = new TransferResult
+            {
+                Origin = request.Origin,
+                Destination = request.Destination,
+                DepartureUT = departUT,
+                ArrivalUT = best.Time,
+                TimeOfFlight = best.Time - departUT,
+                TotalDV = best.Cost,
+                EjectionDV = best.EjectionDV,
+                InsertionDV = best.InsertionDV,
+                FlybyDV = best.FlybyDV,
+                DepartureVInf = best.Legs.Count > 0 ? best.Legs[0].DepartureVInf : 0.0,
+                ArrivalVInf = best.Legs.Count > 0 ? best.Legs[best.Legs.Count - 1].ArrivalVInf : 0.0,
+                GravityRoute = true,
+                RouteBodies = routeCopy,
+                EncounterUTs = best.Times.ToArray(),
+                RouteLegs = best.Legs.ToArray(),
+                RouteName = BuildRouteName(routeCopy)
+            };
+
+            return IsFinite(result.TotalDV);
+        }
+
+        private List<RouteLegResult> EvaluateLambertLeg(CelestialBody from, CelestialBody to, double departUT, double tof)
+        {
+            List<RouteLegResult> results = new List<RouteLegResult>();
+            if (tof <= DaySeconds() * 0.1)
+            {
+                return results;
+            }
+
+            CelestialBody central = from.orbit.referenceBody;
+            double arrivalUT = departUT + tof;
+            Vector3d r1 = from.orbit.getRelativePositionAtUT(departUT);
+            Vector3d r2 = to.orbit.getRelativePositionAtUT(arrivalUT);
+            Vector3d fromVel = from.orbit.getOrbitalVelocityAtUT(departUT);
+            Vector3d toVel = to.orbit.getOrbitalVelocityAtUT(arrivalUT);
+
+            for (int longWayValue = 0; longWayValue < 2; longWayValue++)
+            {
+                bool longWay = longWayValue == 1;
+                Vector3d transferV1;
+                Vector3d transferV2;
+
+                if (!LambertSolver.TrySolve(r1, r2, tof, central.gravParameter, longWay, out transferV1, out transferV2))
+                {
+                    continue;
+                }
+
+                Vector3d departureVInfVector = transferV1 - fromVel;
+                Vector3d arrivalVInfVector = transferV2 - toVel;
+                double departureVInf = departureVInfVector.magnitude;
+                double arrivalVInf = arrivalVInfVector.magnitude;
+                if (!IsFinite(departureVInf) || !IsFinite(arrivalVInf))
+                {
+                    continue;
+                }
+
+                results.Add(new RouteLegResult
+                {
+                    From = from,
+                    To = to,
+                    DepartUT = departUT,
+                    ArrivalUT = arrivalUT,
+                    TimeOfFlight = tof,
+                    DepartureVInfVector = departureVInfVector,
+                    ArrivalVInfVector = arrivalVInfVector,
+                    DepartureVInf = departureVInf,
+                    ArrivalVInf = arrivalVInf,
+                    LongWay = longWay
+                });
+            }
+
+            return results;
+        }
+
+        private List<double> GenerateLegDurations(CelestialBody from, CelestialBody to, double currentUT, double maxArrivalUT, int sampleCount)
+        {
+            List<double> durations = new List<double>();
+            double maxDuration = Math.Max(0.0, maxArrivalUT - currentUT);
+            if (maxDuration <= DaySeconds())
+            {
+                return durations;
+            }
+
+            double nominal = EstimateLegTime(from, to);
+            double[] factors = sampleCount <= 4
+                ? new[] { 0.55, 0.85, 1.20, 1.75 }
+                : sampleCount <= 5
+                    ? new[] { 0.45, 0.70, 1.00, 1.40, 2.05 }
+                    : new[] { 0.40, 0.62, 0.85, 1.10, 1.45, 1.90, 2.55 };
+
+            for (int i = 0; i < factors.Length; i++)
+            {
+                AddDurationIfValid(durations, nominal * factors[i], maxDuration);
+            }
+
+            for (int i = 1; i <= Math.Min(3, sampleCount); i++)
+            {
+                AddDurationIfValid(durations, maxDuration * i / (Math.Min(3, sampleCount) + 1), maxDuration);
+            }
+
+            durations.Sort();
+            return durations;
+        }
+
+        private static void AddDurationIfValid(List<double> durations, double duration, double maxDuration)
+        {
+            double minDuration = DaySeconds() * 2.0;
+            if (!IsFinite(duration) || duration < minDuration || duration > maxDuration)
+            {
+                return;
+            }
+
+            for (int i = 0; i < durations.Count; i++)
+            {
+                if (Math.Abs(durations[i] - duration) < DaySeconds() * 0.5)
+                {
+                    return;
+                }
+            }
+
+            durations.Add(duration);
+        }
+
+        private static double EstimateMinimumRemainingRouteTime(CelestialBody[] route, int nextBodyIndex)
+        {
+            double total = 0.0;
+            for (int i = nextBodyIndex; i < route.Length - 1; i++)
+            {
+                total += Math.Max(DaySeconds() * 2.0, EstimateLegTime(route[i], route[i + 1]) * 0.28);
+            }
+
+            return total;
+        }
+
+        private static double EstimateLegTime(CelestialBody from, CelestialBody to)
+        {
+            if (from == to)
+            {
+                double period = from.orbit.period;
+                if (IsFinite(period) && period > DaySeconds())
+                {
+                    return period * 0.92;
+                }
+                return YearSeconds();
+            }
+
+            double mu = from.orbit.referenceBody.gravParameter;
+            double r1 = Math.Abs(from.orbit.semiMajorAxis);
+            double r2 = Math.Abs(to.orbit.semiMajorAxis);
+            double a = 0.5 * (r1 + r2);
+            double hohmann = Math.PI * Math.Sqrt(a * a * a / mu);
+            return Math.Max(DaySeconds() * 5.0, hohmann);
+        }
+
+        private static FlybyEvaluation EvaluateFlyby(CelestialBody body, Vector3d incomingVInf, Vector3d outgoingVInf)
+        {
+            FlybyEvaluation result = new FlybyEvaluation();
+            double vin = incomingVInf.magnitude;
+            double vout = outgoingVInf.magnitude;
+            if (!IsFinite(vin) || !IsFinite(vout) || vin <= 1e-3 || vout <= 1e-3)
+            {
+                result.IsValid = false;
+                result.PoweredDV = double.PositiveInfinity;
+                return result;
+            }
+
+            double turnRad = AngleRad(incomingVInf, outgoingVInf);
+            double vinAvg = 0.5 * (vin + vout);
+            double maxTurnRad = MaxFlybyTurnAngleRad(body, vinAvg);
+            double excessTurnRad = Math.Max(0.0, turnRad - maxTurnRad);
+            double turnPenalty = 2.0 * vinAvg * Math.Sin(excessTurnRad * 0.5);
+            double magnitudePenalty = Math.Abs(vout - vin);
+
+            result.IsValid = true;
+            result.RequiredTurnDeg = turnRad * 180.0 / Math.PI;
+            result.FreeTurnDeg = maxTurnRad * 180.0 / Math.PI;
+            result.PoweredDV = Math.Sqrt(magnitudePenalty * magnitudePenalty + turnPenalty * turnPenalty);
+            return result;
+        }
+
+        private static double MaxFlybyTurnAngleRad(CelestialBody body, double vinf)
+        {
+            if (!IsFinite(vinf) || vinf <= 0.0 || body.gravParameter <= 0.0)
+            {
+                return 0.0;
+            }
+
+            double rp = SafeFlybyPeriapsisRadius(body);
+            double eccentricity = 1.0 + rp * vinf * vinf / body.gravParameter;
+            if (!IsFinite(eccentricity) || eccentricity <= 1.0)
+            {
+                return Math.PI;
+            }
+
+            return 2.0 * Math.Asin(Clamp(1.0 / eccentricity, 0.0, 1.0));
+        }
+
+        private static double SafeFlybyPeriapsisRadius(CelestialBody body)
+        {
+            double altitude = Math.Max(10000.0, body.Radius * 0.02);
+            if (body.atmosphere)
+            {
+                altitude = Math.Max(altitude, body.atmosphereDepth + 10000.0);
+            }
+
+            return Math.Max(body.Radius + altitude, body.Radius + 1.0);
+        }
+
+        private static double AngleRad(Vector3d a, Vector3d b)
+        {
+            if (a.sqrMagnitude < 1e-16 || b.sqrMagnitude < 1e-16)
+            {
+                return 0.0;
+            }
+
+            return Math.Acos(Clamp(Vector3d.Dot(a.normalized, b.normalized), -1.0, 1.0));
+        }
+
+        private static string BuildRouteName(CelestialBody[] route)
+        {
+            if (route == null || route.Length == 0)
+            {
+                return "";
+            }
+
+            string text = route[0].bodyName;
+            for (int i = 1; i < route.Length; i++)
+            {
+                text += " -> " + route[i].bodyName;
+            }
+
+            return text;
         }
 
         private TransferResult RefineBest(SearchRequest request, TransferResult seed, int passes)
@@ -961,6 +1652,28 @@ namespace AutoTransferWindowPlanner
             }
         }
 
+        private void GetGravityAssistQualitySamples(out int departSamples, out int legSamples, out int beamWidth)
+        {
+            if (qualityIndex <= 0)
+            {
+                departSamples = 6;
+                legSamples = 3;
+                beamWidth = 6;
+            }
+            else if (qualityIndex == 1)
+            {
+                departSamples = 10;
+                legSamples = 4;
+                beamWidth = 8;
+            }
+            else
+            {
+                departSamples = 16;
+                legSamples = 5;
+                beamWidth = 12;
+            }
+        }
+
         private static void GetAutomaticTofRange(CelestialBody origin, CelestialBody destination, out double minTof, out double maxTof)
         {
             double day = DaySeconds();
@@ -1217,6 +1930,13 @@ namespace AutoTransferWindowPlanner
             }
         }
 
+        private sealed class CandidateBody
+        {
+            public CelestialBody Body;
+            public double Score;
+            public double SemiMajorAxis;
+        }
+
         private sealed class SearchRequest
         {
             public CelestialBody Origin;
@@ -1230,6 +1950,101 @@ namespace AutoTransferWindowPlanner
             public int DepartSamples;
             public int TofSamples;
             public bool IncludeCapture;
+        }
+
+        private sealed class GravityRouteSearchRequest
+        {
+            public CelestialBody Origin;
+            public CelestialBody Destination;
+            public double ParkingAltitude;
+            public double CaptureAltitude;
+            public double StartUT;
+            public double SearchSpan;
+            public double MaxMissionTime;
+            public int MaxFlybys;
+            public int DepartSamples;
+            public int LegSamples;
+            public int BeamWidth;
+            public bool IncludeCapture;
+        }
+
+        private sealed class FlybyEvaluation
+        {
+            public bool IsValid;
+            public double PoweredDV;
+            public double RequiredTurnDeg;
+            public double FreeTurnDeg;
+        }
+
+        private sealed class RouteLegResult
+        {
+            public CelestialBody From;
+            public CelestialBody To;
+            public double DepartUT;
+            public double ArrivalUT;
+            public double TimeOfFlight;
+            public Vector3d DepartureVInfVector;
+            public Vector3d ArrivalVInfVector;
+            public double DepartureVInf;
+            public double ArrivalVInf;
+            public double FlybyPoweredDV;
+            public double RequiredTurnDeg;
+            public double FreeTurnDeg;
+            public bool LongWay;
+
+            public RouteLegResult Clone()
+            {
+                return new RouteLegResult
+                {
+                    From = From,
+                    To = To,
+                    DepartUT = DepartUT,
+                    ArrivalUT = ArrivalUT,
+                    TimeOfFlight = TimeOfFlight,
+                    DepartureVInfVector = DepartureVInfVector,
+                    ArrivalVInfVector = ArrivalVInfVector,
+                    DepartureVInf = DepartureVInf,
+                    ArrivalVInf = ArrivalVInf,
+                    FlybyPoweredDV = FlybyPoweredDV,
+                    RequiredTurnDeg = RequiredTurnDeg,
+                    FreeTurnDeg = FreeTurnDeg,
+                    LongWay = LongWay
+                };
+            }
+        }
+
+        private sealed class RouteState
+        {
+            public double Time;
+            public double Cost;
+            public double EjectionDV;
+            public double InsertionDV;
+            public double FlybyDV;
+            public Vector3d IncomingVInf;
+            public List<double> Times;
+            public List<RouteLegResult> Legs;
+
+            public RouteState Clone()
+            {
+                RouteState clone = new RouteState
+                {
+                    Time = Time,
+                    Cost = Cost,
+                    EjectionDV = EjectionDV,
+                    InsertionDV = InsertionDV,
+                    FlybyDV = FlybyDV,
+                    IncomingVInf = IncomingVInf,
+                    Times = new List<double>(Times),
+                    Legs = new List<RouteLegResult>()
+                };
+
+                for (int i = 0; i < Legs.Count; i++)
+                {
+                    clone.Legs.Add(Legs[i].Clone());
+                }
+
+                return clone;
+            }
         }
 
         private sealed class TransferResult
@@ -1247,7 +2062,13 @@ namespace AutoTransferWindowPlanner
             public double PhaseAngleDeg;
             public double EjectionAngleDeg;
             public double EjectionInclinationDeg;
+            public double FlybyDV;
+            public bool GravityRoute;
             public bool LongWay;
+            public CelestialBody[] RouteBodies;
+            public double[] EncounterUTs;
+            public RouteLegResult[] RouteLegs;
+            public string RouteName;
         }
     }
 
