@@ -1,0 +1,66 @@
+# Auto Transfer Window Planner для Kerbal Space Program 1
+
+Небольшой мод для KSP 1.x, который добавляет в игру окно поиска межпланетных трансферных окон и строит простую porkchop-карту по дате старта, времени полёта и delta-v.
+
+## Быстрый запуск
+
+1. Установи Kerbal Space Program 1.x.
+2. Запусти из корня проекта:
+
+```bat
+build.bat
+```
+
+Если KSP стоит не в стандартной Steam-папке, передай путь к игре:
+
+```bat
+build.bat "D:\Games\Kerbal Space Program"
+```
+
+Скрипт:
+
+- найдёт DLL-файлы KSP в `KSP_x64_Data\Managed`;
+- соберёт `AutoTransferWindowPlanner.dll`;
+- положит готовый мод в `GameData\AutoTransferWindowPlanner`;
+- соберёт zip в `dist\AutoTransferWindowPlanner-0.1.0.zip`;
+- скопирует мод в `Kerbal Space Program\GameData`.
+
+После этого запусти игру. Кнопка мода появится в стандартном toolbar KSP в Space Center, Tracking Station, Flight или Map View.
+
+## Ручная установка
+
+После успешной сборки можно вручную скопировать папку:
+
+```text
+GameData\AutoTransferWindowPlanner
+```
+
+в папку:
+
+```text
+Kerbal Space Program\GameData
+```
+
+## Требования для сборки
+
+- Windows;
+- Kerbal Space Program 1.8-1.12;
+- MSBuild из Visual Studio Build Tools или `dotnet msbuild`;
+- DLL из установленной игры:
+  - `Assembly-CSharp.dll`;
+  - `Assembly-CSharp-firstpass.dll`;
+  - `UnityEngine.dll`;
+  - `UnityEngine.CoreModule.dll`;
+  - `UnityEngine.IMGUIModule.dll`.
+
+Готовый DLL не хранится в репозитории, потому что он собирается против DLL конкретной установленной копии KSP.
+
+## Что делает мод
+
+- добавляет кнопку в стандартный toolbar KSP;
+- позволяет выбрать стартовое и целевое тело;
+- ищет оптимальную дату старта в заданном диапазоне лет;
+- автоматически подбирает диапазон времени полёта вокруг гомановского перелёта;
+- считает суммарную delta-v, delta-v вылета, delta-v захвата, `v∞`, `C3`, фазовый угол и параметры вылета.
+
+Сейчас поддерживаются перелёты между телами с одним родителем, например `Kerbin -> Duna`, `Kerbin -> Eve`, `Eve -> Kerbin`, `Duna -> Jool`, `Jool -> Eeloo`.

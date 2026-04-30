@@ -1,0 +1,14 @@
+bin/
+obj/
+dist/
+*.user
+*.suo
+*.csproj.user
+
+GameData/AutoTransferWindowPlanner/Plugins/*.dll
+GameData/AutoTransferWindowPlanner/Plugins/*.pdb
+GameData/AutoTransferWindowPlanner/Plugins/*.mdb
+
+.vs/
+.idea/
+.vscode/

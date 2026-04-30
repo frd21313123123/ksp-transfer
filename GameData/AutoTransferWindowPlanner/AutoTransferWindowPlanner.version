@@ -1,0 +1,21 @@
+{
+  "NAME": "Auto Transfer Window Planner",
+  "URL": "https://raw.githubusercontent.com/frd21313123123/ksp-transfer/main/GameData/AutoTransferWindowPlanner/AutoTransferWindowPlanner.version",
+  "DOWNLOAD": "https://github.com/frd21313123123/ksp-transfer",
+  "VERSION": {
+    "MAJOR": 0,
+    "MINOR": 1,
+    "PATCH": 0,
+    "BUILD": 0
+  },
+  "KSP_VERSION_MIN": {
+    "MAJOR": 1,
+    "MINOR": 8,
+    "PATCH": 0
+  },
+  "KSP_VERSION_MAX": {
+    "MAJOR": 1,
+    "MINOR": 12,
+    "PATCH": 99
+  }
+}
