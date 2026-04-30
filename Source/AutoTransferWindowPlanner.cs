@@ -29,6 +29,7 @@ namespace AutoTransferWindowPlanner
         private Texture2D porkchopTexture;
 
         private Rect windowRect = new Rect(150f, 70f, 820f, 610f);
+        private Vector2 leftScroll;
         private Vector2 scroll;
         private bool windowVisible;
 
@@ -290,7 +291,8 @@ namespace AutoTransferWindowPlanner
 
         private void DrawLeftPanel()
         {
-            GUILayout.BeginVertical(GUILayout.Width(285f));
+            leftScroll = GUILayout.BeginScrollView(leftScroll, GUILayout.Width(295f), GUILayout.Height(545f));
+            GUILayout.BeginVertical(GUILayout.Width(270f));
 
             GUILayout.Label("Параметры поиска", GUILayout.Height(22f));
             DrawBodySelector("Старт", ref originIndex);
@@ -380,6 +382,7 @@ namespace AutoTransferWindowPlanner
                 GUILayout.Height(85f));
 
             GUILayout.EndVertical();
+            GUILayout.EndScrollView();
         }
 
         private void DrawRightPanel()
@@ -397,6 +400,14 @@ namespace AutoTransferWindowPlanner
             scroll = GUILayout.BeginScrollView(scroll, GUILayout.Height(245f));
             GUILayout.TextArea(BuildResultText(), GUILayout.ExpandHeight(true));
             GUILayout.EndScrollView();
+
+            GUILayout.Space(6f);
+            GUI.enabled = bestResult != null && !searchRunning;
+            if (GUILayout.Button("Создать манёвр на активный аппарат", GUILayout.Height(30f)))
+            {
+                CreateFirstManeuverNode();
+            }
+            GUI.enabled = true;
 
             GUILayout.EndVertical();
         }
@@ -467,36 +478,42 @@ namespace AutoTransferWindowPlanner
             TargetSelection target = missionTargets[targetIndex];
             bool selected = selectedTargetIndex == targetIndex;
 
+            GUILayout.BeginVertical(GUI.skin.box, GUILayout.Width(260f));
             GUILayout.BeginHorizontal();
-            if (GUILayout.Toggle(selected, "", GUILayout.Width(18f)))
+            if (GUILayout.Button(selected ? "●" : "○", GUILayout.Width(26f)))
             {
                 selectedTargetIndex = targetIndex;
             }
 
             int bodyIndex = WrapIndex(target.BodyIndex, bodies.Count);
-            if (GUILayout.Button("<", GUILayout.Width(24f)))
+            if (GUILayout.Button("<", GUILayout.Width(28f)))
             {
                 bodyIndex = WrapIndex(bodyIndex - 1, bodies.Count);
             }
-            GUILayout.Label(GetBodyName(bodyIndex), GUILayout.Width(72f));
-            if (GUILayout.Button(">", GUILayout.Width(24f)))
+            GUILayout.Label(GetBodyName(bodyIndex), GUILayout.Width(110f));
+            if (GUILayout.Button(">", GUILayout.Width(28f)))
             {
                 bodyIndex = WrapIndex(bodyIndex + 1, bodies.Count);
             }
 
             target.BodyIndex = bodyIndex;
-            if (GUILayout.Button(target.Mode == TargetVisitMode.Capture ? "Орбита" : "Пролёт", GUILayout.Width(58f)))
-            {
-                target.Mode = target.Mode == TargetVisitMode.Capture ? TargetVisitMode.Flyby : TargetVisitMode.Capture;
-            }
-
             GUI.enabled = missionTargets.Count > 1;
-            if (GUILayout.Button("X", GUILayout.Width(24f)))
+            if (GUILayout.Button("X", GUILayout.Width(28f)))
             {
                 removeIndex = targetIndex;
             }
             GUI.enabled = true;
             GUILayout.EndHorizontal();
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Space(28f);
+            GUILayout.Label("Режим", GUILayout.Width(58f));
+            if (GUILayout.Button(target.Mode == TargetVisitMode.Capture ? "Орбита" : "Пролёт", GUILayout.Width(92f)))
+            {
+                target.Mode = target.Mode == TargetVisitMode.Capture ? TargetVisitMode.Flyby : TargetVisitMode.Capture;
+            }
+            GUILayout.EndHorizontal();
+            GUILayout.EndVertical();
 
             missionTargets[targetIndex] = target;
             SyncDestinationFromTargets();
@@ -2143,12 +2160,13 @@ namespace AutoTransferWindowPlanner
         private void BuildTrajectoryOverlay(TransferResult result)
         {
             ClearTrajectoryOverlay();
-            if (!showTrajectoryOverlay || result == null || result.RouteLegs == null || result.RouteLegs.Length == 0 || !IsMapOverlayScene())
+            if (!showTrajectoryOverlay || result == null || result.RouteLegs == null || result.RouteLegs.Length == 0 || !IsMapOverlayScene() || ScaledSpace.Instance == null)
             {
                 return;
             }
 
             trajectoryOverlayRoot = new GameObject("AutoTransferWindowPlanner_TrajectoryOverlay");
+            AttachOverlayToScaledSpace(trajectoryOverlayRoot);
             overlayResult = result;
 
             for (int i = 0; i < result.RouteLegs.Length; i++)
@@ -2210,13 +2228,15 @@ namespace AutoTransferWindowPlanner
         {
             GameObject segment = new GameObject("ATWP_leg_" + legIndex + "_dash_" + segmentIndex);
             segment.transform.parent = trajectoryOverlayRoot.transform;
+            segment.transform.localPosition = Vector3.zero;
+            segment.layer = trajectoryOverlayRoot.layer;
             LineRenderer line = segment.AddComponent<LineRenderer>();
-            line.useWorldSpace = true;
+            line.useWorldSpace = false;
             line.material = GetTrajectoryLineMaterial();
             line.startColor = new Color(0.2f, 0.95f, 1.0f, 0.85f);
             line.endColor = new Color(1.0f, 0.85f, 0.15f, 0.85f);
-            line.startWidth = 4f;
-            line.endWidth = 4f;
+            line.startWidth = 8f;
+            line.endWidth = 8f;
             line.positionCount = 2;
             line.SetPosition(0, start);
             line.SetPosition(1, end);
@@ -2232,7 +2252,8 @@ namespace AutoTransferWindowPlanner
             GameObject marker = GameObject.CreatePrimitive(PrimitiveType.Sphere);
             marker.name = "ATWP_ghost_" + body.bodyName + "_" + index;
             marker.transform.parent = trajectoryOverlayRoot.transform;
-            marker.transform.position = ToScaledVector3(GetBodyLocalPositionAtUT(body, ut));
+            marker.layer = trajectoryOverlayRoot.layer;
+            marker.transform.localPosition = ToScaledVector3(GetBodyLocalPositionAtUT(body, ut));
             float scaledRadius = Mathf.Clamp((float)(body.Radius * ScaledSpace.ScaleFactor * 2.8), 14f, 70f);
             marker.transform.localScale = new Vector3(scaledRadius, scaledRadius, scaledRadius);
 
@@ -2249,6 +2270,24 @@ namespace AutoTransferWindowPlanner
             }
         }
 
+        private static void AttachOverlayToScaledSpace(GameObject root)
+        {
+            if (root == null)
+            {
+                return;
+            }
+
+            ScaledSpace scaledSpace = ScaledSpace.Instance;
+            if (scaledSpace != null)
+            {
+                root.transform.parent = scaledSpace.transform;
+                root.transform.localPosition = Vector3.zero;
+                root.transform.localRotation = Quaternion.identity;
+                root.transform.localScale = Vector3.one;
+                root.layer = scaledSpace.gameObject.layer;
+            }
+        }
+
         private Material GetTrajectoryLineMaterial()
         {
             if (trajectoryLineMaterial != null)
@@ -2256,10 +2295,24 @@ namespace AutoTransferWindowPlanner
                 return trajectoryLineMaterial;
             }
 
-            Shader shader = Shader.Find("Particles/Additive");
-            if (shader == null) shader = Shader.Find("Legacy Shaders/Particles/Additive");
-            if (shader == null) shader = Shader.Find("Unlit/Color");
-            trajectoryLineMaterial = new Material(shader);
+            Material mapMaterial = MapView.DottedLineMaterialStatic;
+            if (mapMaterial == null)
+            {
+                mapMaterial = MapView.OrbitLinesMaterialStatic;
+            }
+
+            if (mapMaterial != null)
+            {
+                trajectoryLineMaterial = new Material(mapMaterial);
+            }
+            else
+            {
+                Shader shader = Shader.Find("Particles/Additive");
+                if (shader == null) shader = Shader.Find("Legacy Shaders/Particles/Additive");
+                if (shader == null) shader = Shader.Find("Unlit/Color");
+                trajectoryLineMaterial = new Material(shader);
+            }
+
             trajectoryLineMaterial.color = new Color(0.2f, 0.95f, 1.0f, 0.85f);
             return trajectoryLineMaterial;
         }
@@ -2300,6 +2353,137 @@ namespace AutoTransferWindowPlanner
             }
 
             return position;
+        }
+
+        private void CreateFirstManeuverNode()
+        {
+            if (bestResult == null || bestResult.RouteLegs == null || bestResult.RouteLegs.Length == 0)
+            {
+                SetStatus("Сначала рассчитай маршрут.", true);
+                return;
+            }
+
+            if (HighLogic.LoadedScene != GameScenes.FLIGHT)
+            {
+                SetStatus("Манёвр можно создать только на активном аппарате в полёте или Map View.", true);
+                return;
+            }
+
+            Vessel vessel = FlightGlobals.ActiveVessel;
+            if (vessel == null || vessel.orbit == null)
+            {
+                SetStatus("Активный аппарат не найден.", true);
+                return;
+            }
+
+            RouteLegResult firstLeg = bestResult.RouteLegs[0];
+            CelestialBody vesselBody = vessel.orbit.referenceBody != null ? vessel.orbit.referenceBody : vessel.mainBody;
+            if (vesselBody != firstLeg.From)
+            {
+                SetStatus("Активный аппарат должен быть на орбите стартового тела: " + firstLeg.From.bodyName + ".", true);
+                return;
+            }
+
+            if (firstLeg.DepartureVInfVector.sqrMagnitude < 1e-8 || firstLeg.DepartureVInf <= 0.0)
+            {
+                SetStatus("У маршрута нет корректного вектора вылета для создания манёвра.", true);
+                return;
+            }
+
+            if (!vessel.PatchedConicsAttached)
+            {
+                vessel.AttachPatchedConicsSolver();
+            }
+
+            PatchedConicSolver solver = vessel.patchedConicSolver;
+            if (solver == null)
+            {
+                SetStatus("KSP не дал доступ к планировщику манёвров активного аппарата.", true);
+                return;
+            }
+
+            double now = Planetarium.GetUniversalTime();
+            double targetUT = Math.Max(firstLeg.DepartUT, now + 60.0);
+            double nodeUT = FindBestEjectionNodeUT(vessel.orbit, firstLeg.DepartureVInfVector, targetUT);
+            double burnDV = EstimateEjectionBurnDV(vesselBody, vessel.orbit, nodeUT, firstLeg.DepartureVInf);
+            if (!IsFinite(burnDV) || burnDV <= 0.0)
+            {
+                burnDV = firstLeg.DepartureVInf;
+            }
+
+            ManeuverNode node = solver.AddManeuverNode(nodeUT);
+            node.DeltaV = new Vector3d(0.0, 0.0, burnDV);
+            node.OnGizmoUpdated(node.DeltaV, nodeUT);
+            solver.UpdateFlightPlan();
+
+            SetStatus("Манёвр вылета создан на " + FormatUT(nodeUT) + ": " + FormatDV(burnDV) + ". Это первый узел маршрута.", true);
+        }
+
+        private void SetStatus(string message, bool showScreenMessage)
+        {
+            statusText = message;
+            if (showScreenMessage)
+            {
+                ScreenMessages.PostScreenMessage(message, 5f, ScreenMessageStyle.UPPER_CENTER);
+            }
+        }
+
+        private static double FindBestEjectionNodeUT(Orbit orbit, Vector3d desiredVInfVector, double targetUT)
+        {
+            double now = Planetarium.GetUniversalTime() + 60.0;
+            double desiredSqr = desiredVInfVector.sqrMagnitude;
+            if (orbit == null || desiredSqr < 1e-8)
+            {
+                return Math.Max(targetUT, now);
+            }
+
+            Vector3d desired = desiredVInfVector.normalized;
+            double period = orbit.period;
+            if (!IsFinite(period) || period <= 1.0 || period > YearSeconds())
+            {
+                period = DaySeconds();
+            }
+
+            double startUT = Math.Max(now, targetUT - period * 0.5);
+            double bestUT = Math.Max(targetUT, now);
+            double bestScore = double.NegativeInfinity;
+            const int samples = 96;
+
+            for (int i = 0; i <= samples; i++)
+            {
+                double ut = startUT + period * i / samples;
+                Vector3d velocity = orbit.getOrbitalVelocityAtUT(ut);
+                if (velocity.sqrMagnitude < 1e-8)
+                {
+                    continue;
+                }
+
+                double alignment = Vector3d.Dot(velocity.normalized, desired);
+                double timePenalty = Math.Abs(ut - targetUT) / Math.Max(period, 1.0) * 0.05;
+                double score = alignment - timePenalty;
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    bestUT = ut;
+                }
+            }
+
+            return bestUT;
+        }
+
+        private static double EstimateEjectionBurnDV(CelestialBody body, Orbit orbit, double ut, double vinf)
+        {
+            if (body == null || orbit == null || vinf < 0.0)
+            {
+                return double.NaN;
+            }
+
+            Vector3d radiusVector = orbit.getRelativePositionAtUT(ut);
+            Vector3d velocity = orbit.getOrbitalVelocityAtUT(ut);
+            double radius = Math.Max(body.Radius + 1.0, radiusVector.magnitude);
+            double currentSpeed = velocity.magnitude;
+            double escapeSpeedAtRadius = Math.Sqrt(vinf * vinf + 2.0 * body.gravParameter / radius);
+            return Math.Max(0.0, escapeSpeedAtRadius - currentSpeed);
         }
 
         private void RefreshBodies(bool resetSelection)
