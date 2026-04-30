@@ -2377,6 +2377,12 @@ namespace AutoTransferWindowPlanner
             }
 
             RouteLegResult firstLeg = bestResult.RouteLegs[0];
+            if (firstLeg.To == null || firstLeg.CentralBody == null)
+            {
+                SetStatus("У первого участка нет корректной цели для манёвра.", true);
+                return;
+            }
+
             CelestialBody vesselBody = vessel.orbit.referenceBody != null ? vessel.orbit.referenceBody : vessel.mainBody;
             if (vesselBody != firstLeg.From)
             {
@@ -2384,9 +2390,9 @@ namespace AutoTransferWindowPlanner
                 return;
             }
 
-            if (firstLeg.DepartureVInfVector.sqrMagnitude < 1e-8 || firstLeg.DepartureVInf <= 0.0)
+            if (firstLeg.To.orbit == null || firstLeg.To.orbit.referenceBody != firstLeg.CentralBody)
             {
-                SetStatus("У маршрута нет корректного вектора вылета для создания манёвра.", true);
+                SetStatus("Автоузел сейчас поддерживает первый участок между телами с одним центром притяжения.", true);
                 return;
             }
 
@@ -2402,21 +2408,39 @@ namespace AutoTransferWindowPlanner
                 return;
             }
 
-            double now = Planetarium.GetUniversalTime();
-            double targetUT = Math.Max(firstLeg.DepartUT, now + 60.0);
-            double nodeUT = FindBestEjectionNodeUT(vessel.orbit, firstLeg.DepartureVInfVector, targetUT);
-            double burnDV = EstimateEjectionBurnDV(vesselBody, vessel.orbit, nodeUT, firstLeg.DepartureVInf);
-            if (!IsFinite(burnDV) || burnDV <= 0.0)
+            solver.maxTotalPatches = Math.Max(solver.maxTotalPatches, 8);
+            RemoveExistingManeuverNodes(solver);
+
+            ManeuverNode node = solver.AddManeuverNode(Math.Max(firstLeg.DepartUT, Planetarium.GetUniversalTime() + 60.0));
+            ManeuverCandidate candidate = OptimizeManeuverNodeForFirstLeg(solver, node, vessel, firstLeg);
+            if (candidate == null || !candidate.IsValid)
             {
-                burnDV = firstLeg.DepartureVInf;
+                solver.RemoveManeuverNode(node);
+                SetStatus("Не удалось построить игровой манёвр по текущей орбите аппарата.", true);
+                return;
             }
 
-            ManeuverNode node = solver.AddManeuverNode(nodeUT);
-            node.DeltaV = new Vector3d(0.0, 0.0, burnDV);
-            node.OnGizmoUpdated(node.DeltaV, nodeUT);
+            ApplyManeuverNode(node, candidate.UT, candidate.DeltaV);
             solver.UpdateFlightPlan();
 
-            SetStatus("Манёвр вылета создан на " + FormatUT(nodeUT) + ": " + FormatDV(burnDV) + ". Это первый узел маршрута.", true);
+            string targetName = firstLeg.To.bodyName;
+            if (candidate.EncounterFound || candidate.MissDistance <= candidate.TargetSoi)
+            {
+                SetStatus(
+                    "Манёвр подогнан по игре: " + targetName +
+                    ", старт " + FormatUT(candidate.UT) +
+                    ", Δv " + FormatDV(candidate.DeltaVMagnitude) +
+                    ", промах " + FormatDistance(candidate.MissDistance) + ".",
+                    true);
+            }
+            else
+            {
+                SetStatus(
+                    "Манёвр создан, но KSP ещё не показывает вход в SOI " + targetName +
+                    ". Минимальный промах: " + FormatDistance(candidate.MissDistance) +
+                    " при SOI " + FormatDistance(candidate.TargetSoi) + ".",
+                    true);
+            }
         }
 
         private void SetStatus(string message, bool showScreenMessage)
@@ -2428,62 +2452,460 @@ namespace AutoTransferWindowPlanner
             }
         }
 
-        private static double FindBestEjectionNodeUT(Orbit orbit, Vector3d desiredVInfVector, double targetUT)
+        private static void RemoveExistingManeuverNodes(PatchedConicSolver solver)
+        {
+            if (solver == null || solver.maneuverNodes == null)
+            {
+                return;
+            }
+
+            for (int i = solver.maneuverNodes.Count - 1; i >= 0; i--)
+            {
+                solver.RemoveManeuverNode(solver.maneuverNodes[i]);
+            }
+        }
+
+        private ManeuverCandidate OptimizeManeuverNodeForFirstLeg(PatchedConicSolver solver, ManeuverNode node, Vessel vessel, RouteLegResult leg)
         {
             double now = Planetarium.GetUniversalTime() + 60.0;
-            double desiredSqr = desiredVInfVector.sqrMagnitude;
-            if (orbit == null || desiredSqr < 1e-8)
+            double plannedUT = Math.Max(leg.DepartUT, now);
+            double orbitPeriod = vessel.orbit.period;
+            if (!IsFinite(orbitPeriod) || orbitPeriod <= 1.0 || orbitPeriod > YearSeconds())
             {
-                return Math.Max(targetUT, now);
+                orbitPeriod = DaySeconds();
             }
 
-            Vector3d desired = desiredVInfVector.normalized;
-            double period = orbit.period;
-            if (!IsFinite(period) || period <= 1.0 || period > YearSeconds())
+            ManeuverCandidate best = null;
+            double startUT = Math.Max(now, plannedUT - orbitPeriod * 0.5);
+            int timeSamples = 36;
+            for (int i = 0; i <= timeSamples; i++)
             {
-                period = DaySeconds();
+                double ut = startUT + orbitPeriod * i / timeSamples;
+                TryEvaluateLambertSeed(solver, node, vessel, leg, ut, leg.LongWay, ref best);
+                TryEvaluateLambertSeed(solver, node, vessel, leg, ut, !leg.LongWay, ref best);
             }
 
-            double startUT = Math.Max(now, targetUT - period * 0.5);
-            double bestUT = Math.Max(targetUT, now);
-            double bestScore = double.NegativeInfinity;
-            const int samples = 96;
-
-            for (int i = 0; i <= samples; i++)
+            if (best == null || !best.IsValid)
             {
-                double ut = startUT + period * i / samples;
-                Vector3d velocity = orbit.getOrbitalVelocityAtUT(ut);
-                if (velocity.sqrMagnitude < 1e-8)
+                return best;
+            }
+
+            ApplyManeuverNode(node, best.UT, best.DeltaV);
+            RefineManeuverNodeComponents(solver, node, leg, ref best);
+            return best;
+        }
+
+        private void TryEvaluateLambertSeed(PatchedConicSolver solver, ManeuverNode node, Vessel vessel, RouteLegResult leg, double ut, bool longWay, ref ManeuverCandidate best)
+        {
+            Vector3d deltaV;
+            double arrivalUT;
+            if (!TryComputeGameStateLambertDeltaV(vessel, leg, ut, longWay, out deltaV, out arrivalUT))
+            {
+                return;
+            }
+
+            Vector3d[] seeds =
+            {
+                deltaV,
+                new Vector3d(-deltaV.x, deltaV.y, deltaV.z),
+                new Vector3d(deltaV.x, -deltaV.y, deltaV.z),
+                new Vector3d(-deltaV.x, -deltaV.y, deltaV.z)
+            };
+
+            for (int i = 0; i < seeds.Length; i++)
+            {
+                ApplyManeuverNode(node, ut, seeds[i]);
+                ManeuverCandidate candidate = EvaluateCurrentManeuverNode(solver, node, leg, arrivalUT);
+                if (candidate == null || !candidate.IsValid)
                 {
                     continue;
                 }
 
-                double alignment = Vector3d.Dot(velocity.normalized, desired);
-                double timePenalty = Math.Abs(ut - targetUT) / Math.Max(period, 1.0) * 0.05;
-                double score = alignment - timePenalty;
-                if (score > bestScore)
+                candidate.DeltaV = seeds[i];
+                candidate.UT = ut;
+                candidate.ArrivalUT = arrivalUT;
+                if (IsBetterManeuverCandidate(candidate, best))
                 {
-                    bestScore = score;
+                    best = candidate;
+                }
+            }
+        }
+
+        private bool TryComputeGameStateLambertDeltaV(Vessel vessel, RouteLegResult leg, double nodeUT, bool longWay, out Vector3d deltaV, out double arrivalUT)
+        {
+            deltaV = Vector3d.zero;
+            arrivalUT = leg.ArrivalUT + (nodeUT - leg.DepartUT);
+            double minArrivalUT = nodeUT + DaySeconds() * 0.25;
+            if (arrivalUT < minArrivalUT)
+            {
+                arrivalUT = minArrivalUT;
+            }
+
+            double tof = arrivalUT - nodeUT;
+            if (!IsFinite(tof) || tof <= DaySeconds() * 0.1)
+            {
+                return false;
+            }
+
+            CelestialBody central = leg.CentralBody;
+            Vector3d originPosition = GetBodyPositionRelativeTo(leg.From, central, nodeUT);
+            Vector3d originVelocity = GetBodyVelocityRelativeTo(leg.From, central, nodeUT);
+            Vector3d vesselPosition = vessel.orbit.getRelativePositionAtUT(nodeUT);
+            Vector3d vesselVelocity = vessel.orbit.getOrbitalVelocityAtUT(nodeUT);
+            Vector3d targetPosition = GetBodyPositionRelativeTo(leg.To, central, arrivalUT);
+
+            Vector3d r1 = originPosition + vesselPosition;
+            Vector3d currentVelocity = originVelocity + vesselVelocity;
+            Vector3d transferVelocity;
+            Vector3d ignoredArrivalVelocity;
+            if (!LambertSolver.TrySolve(r1, targetPosition, tof, central.gravParameter, longWay, out transferVelocity, out ignoredArrivalVelocity))
+            {
+                return false;
+            }
+
+            Vector3d worldDelta = transferVelocity - currentVelocity;
+            if (!IsFinite(worldDelta.magnitude) || worldDelta.magnitude <= 0.0 || worldDelta.magnitude > 25000.0)
+            {
+                return false;
+            }
+
+            deltaV = WorldDeltaToManeuverDelta(vessel.orbit, nodeUT, worldDelta);
+            return IsFinite(deltaV.magnitude);
+        }
+
+        private void RefineManeuverNodeComponents(PatchedConicSolver solver, ManeuverNode node, RouteLegResult leg, ref ManeuverCandidate best)
+        {
+            double[] steps = { 250.0, 100.0, 40.0, 15.0, 5.0, 1.5, 0.5 };
+            for (int stepIndex = 0; stepIndex < steps.Length; stepIndex++)
+            {
+                double step = steps[stepIndex];
+                bool improved = true;
+                int guard = 0;
+                while (improved && guard < 6)
+                {
+                    improved = false;
+                    guard++;
+                    for (int axis = 0; axis < 3; axis++)
+                    {
+                        for (int sign = -1; sign <= 1; sign += 2)
+                        {
+                            Vector3d testDelta = best.DeltaV;
+                            if (axis == 0) testDelta.x += sign * step;
+                            if (axis == 1) testDelta.y += sign * step;
+                            if (axis == 2) testDelta.z += sign * step;
+                            ApplyManeuverNode(node, best.UT, testDelta);
+
+                            ManeuverCandidate candidate = EvaluateCurrentManeuverNode(solver, node, leg, best.ArrivalUT);
+                            if (candidate == null || !candidate.IsValid)
+                            {
+                                continue;
+                            }
+
+                            candidate.DeltaV = testDelta;
+                            candidate.UT = best.UT;
+                            candidate.ArrivalUT = best.ArrivalUT;
+                            if (IsBetterManeuverCandidate(candidate, best))
+                            {
+                                best = candidate;
+                                improved = true;
+                            }
+                        }
+                    }
+                }
+
+                if (best.EncounterFound || best.MissDistance <= best.TargetSoi)
+                {
+                    break;
+                }
+            }
+
+            ApplyManeuverNode(node, best.UT, best.DeltaV);
+        }
+
+        private ManeuverCandidate EvaluateCurrentManeuverNode(PatchedConicSolver solver, ManeuverNode node, RouteLegResult leg, double arrivalUT)
+        {
+            if (solver == null || node == null || leg == null || leg.To == null)
+            {
+                return null;
+            }
+
+            solver.UpdateFlightPlan();
+            ManeuverCandidate candidate = new ManeuverCandidate
+            {
+                IsValid = true,
+                UT = node.UT,
+                DeltaV = node.DeltaV,
+                ArrivalUT = arrivalUT,
+                MissDistance = double.PositiveInfinity,
+                TargetSoi = GetSafeSphereOfInfluence(leg.To)
+            };
+
+            List<Orbit> patches = CollectSolverPatches(solver, node);
+            for (int i = 0; i < patches.Count; i++)
+            {
+                Orbit patch = patches[i];
+                if (patch == null)
+                {
+                    continue;
+                }
+
+                if (patch.referenceBody == leg.To)
+                {
+                    candidate.EncounterFound = true;
+                    candidate.MissDistance = 0.0;
+                    candidate.EncounterUT = patch.StartUT;
+                    return candidate;
+                }
+
+                if (patch.closestEncounterBody == leg.To && patch.closestEncounterPatch != null && patch.closestEncounterPatch.referenceBody == leg.To)
+                {
+                    candidate.EncounterFound = true;
+                    candidate.MissDistance = 0.0;
+                    candidate.EncounterUT = patch.closestEncounterPatch.StartUT;
+                    return candidate;
+                }
+            }
+
+            for (int i = 0; i < patches.Count; i++)
+            {
+                Orbit patch = patches[i];
+                if (patch == null || patch.referenceBody != leg.CentralBody)
+                {
+                    continue;
+                }
+
+                double missUT;
+                double miss = SampleClosestApproach(patch, leg.To, leg.CentralBody, arrivalUT, out missUT);
+                if (IsFinite(miss) && miss < candidate.MissDistance)
+                {
+                    candidate.MissDistance = miss;
+                    candidate.EncounterUT = missUT;
+                }
+            }
+
+            return IsFinite(candidate.MissDistance) ? candidate : null;
+        }
+
+        private static List<Orbit> CollectSolverPatches(PatchedConicSolver solver, ManeuverNode node)
+        {
+            List<Orbit> patches = new List<Orbit>();
+            AddPatchIfMissing(patches, node.patch);
+            AddPatchChain(patches, node.nextPatch);
+            if (solver.flightPlan != null)
+            {
+                for (int i = 0; i < solver.flightPlan.Count; i++)
+                {
+                    AddPatchIfMissing(patches, solver.flightPlan[i]);
+                }
+            }
+            if (solver.patches != null)
+            {
+                for (int i = 0; i < solver.patches.Count; i++)
+                {
+                    AddPatchIfMissing(patches, solver.patches[i]);
+                }
+            }
+            AddPatchChain(patches, solver.orbit);
+            return patches;
+        }
+
+        private static void AddPatchChain(List<Orbit> patches, Orbit patch)
+        {
+            int guard = 0;
+            while (patch != null && guard < 16)
+            {
+                AddPatchIfMissing(patches, patch);
+                patch = patch.nextPatch;
+                guard++;
+            }
+        }
+
+        private static void AddPatchIfMissing(List<Orbit> patches, Orbit patch)
+        {
+            if (patch != null && !patches.Contains(patch))
+            {
+                patches.Add(patch);
+            }
+        }
+
+        private static double SampleClosestApproach(Orbit patch, CelestialBody target, CelestialBody central, double plannedArrivalUT, out double bestUT)
+        {
+            bestUT = plannedArrivalUT;
+            double startUT = patch.StartUT;
+            double endUT = patch.EndUT;
+            if (!IsFinite(startUT) || startUT <= 0.0)
+            {
+                startUT = Planetarium.GetUniversalTime();
+            }
+            if (!IsFinite(endUT) || endUT <= startUT)
+            {
+                endUT = plannedArrivalUT + Math.Max(DaySeconds() * 20.0, Math.Abs(plannedArrivalUT - startUT) * 0.2);
+            }
+
+            double window = Math.Max(DaySeconds() * 20.0, Math.Min(YearSeconds(), Math.Abs(plannedArrivalUT - startUT) * 0.25));
+            double sampleStart = Math.Max(startUT, plannedArrivalUT - window);
+            double sampleEnd = Math.Min(endUT, plannedArrivalUT + window);
+            if (sampleEnd <= sampleStart)
+            {
+                sampleStart = startUT;
+                sampleEnd = Math.Min(endUT, startUT + window * 2.0);
+            }
+            if (sampleEnd <= sampleStart)
+            {
+                return double.PositiveInfinity;
+            }
+
+            double bestMiss = double.PositiveInfinity;
+            const int samples = 72;
+            for (int i = 0; i <= samples; i++)
+            {
+                double ut = sampleStart + (sampleEnd - sampleStart) * i / samples;
+                double miss = DistanceToTargetAtUT(patch, target, central, ut);
+                if (miss < bestMiss)
+                {
+                    bestMiss = miss;
                     bestUT = ut;
                 }
             }
 
-            return bestUT;
-        }
-
-        private static double EstimateEjectionBurnDV(CelestialBody body, Orbit orbit, double ut, double vinf)
-        {
-            if (body == null || orbit == null || vinf < 0.0)
+            double refineSpan = (sampleEnd - sampleStart) / samples;
+            for (int pass = 0; pass < 4; pass++)
             {
-                return double.NaN;
+                double localStart = Math.Max(startUT, bestUT - refineSpan);
+                double localEnd = Math.Min(endUT, bestUT + refineSpan);
+                for (int i = 0; i <= 12; i++)
+                {
+                    double ut = localStart + (localEnd - localStart) * i / 12.0;
+                    double miss = DistanceToTargetAtUT(patch, target, central, ut);
+                    if (miss < bestMiss)
+                    {
+                        bestMiss = miss;
+                        bestUT = ut;
+                    }
+                }
+                refineSpan *= 0.25;
             }
 
-            Vector3d radiusVector = orbit.getRelativePositionAtUT(ut);
+            return bestMiss;
+        }
+
+        private static double DistanceToTargetAtUT(Orbit patch, CelestialBody target, CelestialBody central, double ut)
+        {
+            Vector3d vesselPosition = patch.getRelativePositionAtUT(ut);
+            Vector3d targetPosition = GetBodyPositionRelativeTo(target, central, ut);
+            return (vesselPosition - targetPosition).magnitude;
+        }
+
+        private static bool IsBetterManeuverCandidate(ManeuverCandidate candidate, ManeuverCandidate current)
+        {
+            if (candidate == null || !candidate.IsValid)
+            {
+                return false;
+            }
+            if (current == null || !current.IsValid)
+            {
+                return true;
+            }
+            if (candidate.EncounterFound != current.EncounterFound)
+            {
+                return candidate.EncounterFound;
+            }
+
+            double candidateScore = candidate.MissDistance / Math.Max(1.0, candidate.TargetSoi);
+            double currentScore = current.MissDistance / Math.Max(1.0, current.TargetSoi);
+            if (Math.Abs(candidateScore - currentScore) > 0.001)
+            {
+                return candidateScore < currentScore;
+            }
+
+            return candidate.DeltaVMagnitude < current.DeltaVMagnitude;
+        }
+
+        private static void ApplyManeuverNode(ManeuverNode node, double ut, Vector3d deltaV)
+        {
+            node.DeltaV = deltaV;
+            node.OnGizmoUpdated(deltaV, ut);
+        }
+
+        private static Vector3d WorldDeltaToManeuverDelta(Orbit orbit, double ut, Vector3d worldDelta)
+        {
+            Vector3d radius = orbit.getRelativePositionAtUT(ut);
             Vector3d velocity = orbit.getOrbitalVelocityAtUT(ut);
-            double radius = Math.Max(body.Radius + 1.0, radiusVector.magnitude);
-            double currentSpeed = velocity.magnitude;
-            double escapeSpeedAtRadius = Math.Sqrt(vinf * vinf + 2.0 * body.gravParameter / radius);
-            return Math.Max(0.0, escapeSpeedAtRadius - currentSpeed);
+            if (radius.sqrMagnitude < 1e-12 || velocity.sqrMagnitude < 1e-12)
+            {
+                return new Vector3d(0.0, 0.0, worldDelta.magnitude);
+            }
+
+            Vector3d prograde = velocity.normalized;
+            Vector3d normal = Vector3d.Cross(radius, velocity).normalized;
+            Vector3d radial = Vector3d.Cross(prograde, normal).normalized;
+            return new Vector3d(
+                Vector3d.Dot(worldDelta, radial),
+                Vector3d.Dot(worldDelta, normal),
+                Vector3d.Dot(worldDelta, prograde));
+        }
+
+        private static Vector3d GetBodyPositionRelativeTo(CelestialBody body, CelestialBody central, double ut)
+        {
+            return GetBodyLocalPositionAtUT(body, ut) - GetBodyLocalPositionAtUT(central, ut);
+        }
+
+        private static Vector3d GetBodyVelocityRelativeTo(CelestialBody body, CelestialBody central, double ut)
+        {
+            return GetBodyLocalVelocityAtUT(body, ut) - GetBodyLocalVelocityAtUT(central, ut);
+        }
+
+        private static Vector3d GetBodyLocalVelocityAtUT(CelestialBody body, double ut)
+        {
+            if (body == null || body.orbit == null)
+            {
+                return Vector3d.zero;
+            }
+
+            Vector3d velocity = body.orbit.getOrbitalVelocityAtUT(ut);
+            CelestialBody parent = body.orbit.referenceBody;
+            if (parent != null && parent.orbit != null)
+            {
+                velocity += GetBodyLocalVelocityAtUT(parent, ut);
+            }
+
+            return velocity;
+        }
+
+        private static double GetSafeSphereOfInfluence(CelestialBody body)
+        {
+            if (body == null)
+            {
+                return 1.0;
+            }
+
+            double soi = body.sphereOfInfluence;
+            if (!IsFinite(soi) || soi <= 0.0)
+            {
+                soi = body.Radius * 10.0;
+            }
+            return Math.Max(1.0, soi);
+        }
+
+        private static string FormatDistance(double meters)
+        {
+            if (!IsFinite(meters))
+            {
+                return "—";
+            }
+            if (meters >= 1000000000.0)
+            {
+                return FormatNumber(meters / 1000000000.0, 2) + " Гм";
+            }
+            if (meters >= 1000000.0)
+            {
+                return FormatNumber(meters / 1000000.0, 2) + " Мм";
+            }
+            if (meters >= 1000.0)
+            {
+                return FormatNumber(meters / 1000.0, 1) + " км";
+            }
+            return FormatNumber(meters, 0) + " м";
         }
 
         private void RefreshBodies(bool resetSelection)
@@ -3009,6 +3431,23 @@ namespace AutoTransferWindowPlanner
             public double FreeTurnDeg;
             public string AssistName;
             public double AssistUT;
+        }
+
+        private sealed class ManeuverCandidate
+        {
+            public bool IsValid;
+            public bool EncounterFound;
+            public double UT;
+            public double ArrivalUT;
+            public double EncounterUT;
+            public double MissDistance;
+            public double TargetSoi;
+            public Vector3d DeltaV;
+
+            public double DeltaVMagnitude
+            {
+                get { return DeltaV.magnitude; }
+            }
         }
 
         private sealed class RouteLegResult
