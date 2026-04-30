@@ -1,5 +1,8 @@
-После сборки здесь должен появиться файл:
+After a successful build, this folder should contain:
 AutoTransferWindowPlanner.dll
 
-Собрать можно через:
-Tools\build.ps1 -KspPath "C:\путь\к\Kerbal Space Program"
+Build from the project root with:
+build.bat
+
+Or pass the KSP folder explicitly:
+build.bat "D:\Games\Kerbal Space Program"

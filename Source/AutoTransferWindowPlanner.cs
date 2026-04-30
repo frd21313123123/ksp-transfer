@@ -16,7 +16,7 @@ namespace AutoTransferWindowPlanner
     ///
     /// This is intentionally dependency-free: no ToolbarController, no KAC, no external DLLs.
     /// </summary>
-    [KSPAddon(KSPAddon.Startup.EveryScene, false)]
+    [KSPAddon(KSPAddon.Startup.AllGameScenes, false)]
     public class AutoTransferWindowPlannerAddon : MonoBehaviour
     {
         private const string ModName = "Auto Transfer Window Planner";
@@ -67,12 +67,11 @@ namespace AutoTransferWindowPlanner
         {
             if (instance != null && instance != this)
             {
-                Destroy(this);
+                Destroy(gameObject);
                 return;
             }
 
             instance = this;
-            DontDestroyOnLoad(gameObject);
 
             launcherIcon = CreateLauncherIcon();
             GameEvents.onGUIApplicationLauncherReady.Add(OnAppLauncherReady);
@@ -142,6 +141,9 @@ namespace AutoTransferWindowPlanner
                 ApplicationLauncher.AppScenes.MAPVIEW |
                 ApplicationLauncher.AppScenes.TRACKSTATION,
                 launcherIcon);
+
+            launcherButton.onLeftClick += ShowWindow;
+            Debug.Log("[AutoTransferWindowPlanner] Toolbar button registered.");
         }
 
         private void OnAppLauncherDestroyed()
@@ -169,7 +171,9 @@ namespace AutoTransferWindowPlanner
         private void ShowWindow()
         {
             windowVisible = true;
+            windowRect = ClampWindowRect(windowRect);
             RefreshBodies(false);
+            Debug.Log("[AutoTransferWindowPlanner] Window opened.");
         }
 
         private void HideWindow()
@@ -207,6 +211,8 @@ namespace AutoTransferWindowPlanner
                 GUI.skin = HighLogic.Skin;
             }
 
+            GUI.depth = -1000;
+            windowRect = ClampWindowRect(windowRect);
             windowRect = GUILayout.Window(GetInstanceID(), windowRect, DrawWindow, ModName, GUILayout.Width(820f), GUILayout.Height(610f));
         }
 
@@ -225,7 +231,30 @@ namespace AutoTransferWindowPlanner
             DrawRightPanel();
             GUILayout.EndHorizontal();
 
+            GUILayout.BeginHorizontal();
+            GUILayout.FlexibleSpace();
+            if (GUILayout.Button("Закрыть", GUILayout.Width(90f)))
+            {
+                HideWindow();
+                if (launcherButton != null)
+                {
+                    launcherButton.SetFalse();
+                }
+            }
+            GUILayout.EndHorizontal();
+
             GUI.DragWindow(new Rect(0f, 0f, 10000f, 28f));
+        }
+
+        private static Rect ClampWindowRect(Rect rect)
+        {
+            float width = Mathf.Min(820f, Mathf.Max(360f, Screen.width - 20f));
+            float height = Mathf.Min(610f, Mathf.Max(260f, Screen.height - 20f));
+            rect.width = width;
+            rect.height = height;
+            rect.x = Mathf.Clamp(rect.x, 10f, Mathf.Max(10f, Screen.width - width - 10f));
+            rect.y = Mathf.Clamp(rect.y, 10f, Mathf.Max(10f, Screen.height - height - 10f));
+            return rect;
         }
 
         private void DrawLeftPanel()

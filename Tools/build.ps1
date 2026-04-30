@@ -198,6 +198,9 @@ $project = Join-Path $root "Source\AutoTransferWindowPlanner.csproj"
 $modName = "AutoTransferWindowPlanner"
 $modGameData = Join-Path $root "GameData\$modName"
 $pluginDll = Join-Path $modGameData "Plugins\$modName.dll"
+$versionFile = Join-Path $modGameData "$modName.version"
+$versionData = Get-Content -Raw -LiteralPath $versionFile | ConvertFrom-Json
+$modVersion = "$($versionData.VERSION.MAJOR).$($versionData.VERSION.MINOR).$($versionData.VERSION.PATCH)"
 
 if (-not $OutputDir) {
     $OutputDir = Join-Path $root "dist"
@@ -283,7 +286,7 @@ if (Test-Path $packagedPlaceholder) {
 }
 
 if (-not $NoZip) {
-    $zipPath = Join-Path $OutputDir "$modName-0.1.0.zip"
+    $zipPath = Join-Path $OutputDir "$modName-$modVersion.zip"
     if (Test-Path $zipPath) {
         Remove-Item -LiteralPath $zipPath -Force
     }
