@@ -62,6 +62,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Include="AstrodynamicsMath.cs" />
+    <Compile Include="ManeuverSeedRules.cs" />
+    <Compile Include="OrbitSafety.cs" />
+    <Compile Include="RoutePlanningRules.cs" />
     <Compile Include="AutoTransferWindowPlanner.cs" />
   </ItemGroup>
 

@@ -152,7 +152,7 @@ function Invoke-DirectBuild {
         [string]$CompilerPath,
         [string]$ManagedPath,
         [string]$OutputDll,
-        [string]$SourceFile
+        [string[]]$SourceFiles
     )
 
     if (-not $CompilerPath) {
@@ -192,7 +192,7 @@ function Invoke-DirectBuild {
         /nostdlib+ `
         /out:$OutputDll `
         $referenceArgs `
-        $SourceFile
+        $SourceFiles
 
     if ($LASTEXITCODE -ne 0) {
         throw "Direct compiler failed with exit code $LASTEXITCODE."
@@ -243,7 +243,9 @@ Write-Host "KSP path: $($ksp.KspPath)"
 Write-Host "KSP managed DLLs: $($ksp.ManagedPath)"
 Write-Host "Building Release DLL..."
 
-$sourceFile = Join-Path $root "Source\AutoTransferWindowPlanner.cs"
+$sourceFiles = Get-ChildItem -LiteralPath (Join-Path $root "Source") -Filter "*.cs" |
+    Sort-Object Name |
+    ForEach-Object { $_.FullName }
 $roslynCompiler = Get-RoslynCompiler
 $directBuildSucceeded = $false
 
@@ -252,7 +254,7 @@ try {
         -CompilerPath $roslynCompiler `
         -ManagedPath $ksp.ManagedPath `
         -OutputDll $pluginDll `
-        -SourceFile $sourceFile
+        -SourceFiles $sourceFiles
 } catch {
     Write-Host "Direct compiler path failed: $($_.Exception.Message)" -ForegroundColor Yellow
 }
